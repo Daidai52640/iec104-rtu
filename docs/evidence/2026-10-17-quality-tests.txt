@@ -1,0 +1,10 @@
+  PASS  test_apply_marks_missing_points_invalid
+  PASS  test_apply_no_change_returns_empty
+  PASS  test_command_points_are_not_invalidated_by_polling
+  PASS  test_interrogation_reports_invalid_when_device_lost
+  PASS  test_invalidate_all
+  PASS  test_quality_change_is_reported_spontaneously
+  PASS  test_quality_helpers
+  PASS  test_recovery_clears_invalid
+------------------------------------------------------------
+8/8 passed
