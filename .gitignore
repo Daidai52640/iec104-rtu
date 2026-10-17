@@ -1,0 +1,29 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# ---- 运行产物 ----
+*.log
+logs/
+data/*.tmp
+*.pid
+
+# ---- 编辑器 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- ⚠️ 凭据与本地配置 ----
+config.local.*
+
+# ---- ⚠️ 本地文档与归档：不进公开仓库 ----
+# 工作记录、临时产物与历史资料。公开侧只保留可复核的技术事实。
+_worklog/
+_local/
+_archive/

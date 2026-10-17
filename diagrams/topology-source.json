@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "iec104-rtu · 104 子站全链路拓扑",
+    "locale": "zh-CN",
+    "output": ".archify/architecture-p2-104-topology-20261016-073438/p2-104-topology.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "linux", "type": "backend", "label": "Linux 机 · 104 主站", "sublabel": "开源主站工具 · 旧 PC", "pos": [1140, 278], "size": [150, 64] },
+    { "id": "router", "type": "cloud", "label": "家用路由器", "sublabel": "同一网段", "pos": [940, 278], "size": [120, 64] },
+    { "id": "pi", "type": "backend", "label": "树莓派 2B · 104 子站", "sublabel": "systemd · 无 WiFi", "pos": [690, 278], "size": [170, 64] },
+    { "id": "adapter", "type": "external", "label": "USB 转 485", "sublabel": "CH340 · 非隔离", "pos": [460, 278], "size": [150, 64] },
+    { "id": "bus", "type": "messagebus", "label": "RS485 总线", "sublabel": "半双工 · 须共地", "pos": [255, 190], "size": [130, 240] },
+    { "id": "meter", "type": "external", "label": "温湿度变送器", "sublabel": "从站 0x01 · 4800/8N1", "pos": [30, 220], "size": [150, 64] },
+    { "id": "relay", "type": "external", "label": "Modbus 继电器", "sublabel": "从站 0x02 · 8DI+8DO", "pos": [30, 340], "size": [150, 64] },
+    { "id": "analyzer", "type": "external", "label": "逻辑分析仪", "sublabel": "24MHz 8CH · 仅取证", "pos": [245, 60], "size": [150, 64] },
+    { "id": "winpc", "type": "external", "label": "Windows 11 开发机", "sublabel": "不进运行链路", "pos": [460, 520], "size": [170, 80] }
+  ],
+  "connections": [
+    { "id": "meter-bus", "from": "meter", "to": "bus" },
+    { "id": "relay-bus", "from": "relay", "to": "bus" },
+    { "id": "bus-adapter", "from": "bus", "to": "adapter" },
+    { "id": "adapter-pi", "from": "adapter", "to": "pi", "label": "USB-A" },
+    { "id": "pi-router", "from": "pi", "to": "router", "label": "网线" },
+    { "id": "router-linux", "from": "router", "to": "linux", "label": "网线" },
+    { "id": "iec104", "from": "linux", "to": "pi", "label": "IEC 104 · TCP 2404", "variant": "emphasis", "fromSide": "bottom", "toSide": "bottom", "via": [[1215, 470], [775, 470]], "labelAt": [995, 470] },
+    { "id": "analyzer-bus", "from": "analyzer", "to": "bus", "label": "取证", "variant": "dashed" },
+    { "id": "winpc-adapter", "from": "winpc", "to": "adapter", "label": "开发期先插这里", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "电脑分工", "items": ["运行链路只有两台：树莓派（子站）+ Linux 机（主站）", "USB 转 485：开发期插 Windows，Linux 就位后改插树莓派", "Windows 不参与运行时链路，只当开发机与调试台"] },
+    { "dot": "emerald", "title": "现场设备与参数", "items": ["变送器：从站 0x01，4800/8N1，DC10-30V，只读（功能码 03）", "继电器：目标从站 0x02，8 路 DI 干接点 + 8 路 DO 无源触点", "同一条总线必须同波特率、同校验位、从站地址不冲突"] },
+    { "dot": "amber", "title": "供电", "items": ["12V 2A：变送器 + 继电器模块并联（DC9-16V，禁 24V）", "5V 2A：树莓派（micro-USB）", "上电前量空载电压与极性，别把 12V 接到 A/B 上"] },
+    { "dot": "rose", "title": "风险与待办", "items": ["第 1 周必须跑通一个开源 104 主站，跑不通就评估止损", "逻辑分析仪夹不到 USB-485 的 TTL 侧，做波形需另配 MAX485", "两根同款 CH340 无序列号，Pi 上勿硬编码 /dev/ttyUSB0"] }
+  ]
+}
