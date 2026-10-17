@@ -20,6 +20,7 @@ COT（传送原因）2 字节：
     M_ME_NC_1  5 字节 = 4 字节短浮点 + 1 字节 QDS  ⚠️ 浮点是**小端**（实测 23.7 = 9A 99 BD 41）
     C_SC_NA_1  1 字节 SCO（bit0=SCS，bit7=S/E）
     C_IC_NA_1  1 字节 QOI
+    C_CS_NA_1  7 字节 CP56Time2a（对时：纯时标，无品质位）
 
 ⚠️ 不依赖任何第三方 104 库。数值定义见 types.py，需与标准原文核对。
 """
@@ -41,7 +42,7 @@ class InformationObject:
     value: Any = None              # bool / float / int
     quality: int = 0               # QDS（遥测）或 SIQ 高位（遥信）
     select: bool = False           # 仅遥控：S/E 位（True=选择，False=执行）
-    timestamp: Optional[datetime] = None  # 仅带时标类型（M_SP_TB_1 等）
+    timestamp: Optional[datetime] = None  # 仅带时标类型（M_SP_TB_1 等；C_CS_NA_1 只有它）
 
     def __repr__(self) -> str:
         extra = " SEL" if self.select else ""
@@ -81,6 +82,7 @@ DATA_LEN = {
     int(TypeID.M_ME_NC_1): 5,
     int(TypeID.C_SC_NA_1): 1,
     int(TypeID.C_IC_NA_1): 1,
+    int(TypeID.C_CS_NA_1): 7,     # 纯 7 字节 CP56Time2a（对时，无 SIQ/QDS）
 }
 
 
@@ -105,6 +107,11 @@ def _encode_data(type_id: int, obj: InformationObject) -> bytes:
 
     if type_id == int(TypeID.C_IC_NA_1):
         return bytes((int(obj.value) & 0xFF,))
+
+    if type_id == int(TypeID.C_CS_NA_1):
+        # 对时：数据段就是 7 字节 CP56Time2a（不像 M_SP_TB_1 那样带 SIQ）。
+        # 未指定时刻时 encode_cp56(None) 取当前 UTC。
+        return encode_cp56(obj.timestamp)
 
     raise ValueError(f"unsupported TypeID {type_id}")
 
@@ -135,6 +142,11 @@ def _decode_data(type_id: int, chunk: bytes, obj: InformationObject) -> None:
 
     if type_id == int(TypeID.C_IC_NA_1):
         obj.value = chunk[0]
+        return
+
+    if type_id == int(TypeID.C_CS_NA_1):
+        # 对时：只有时标，value 保持 None；时标非法时 decode_cp56 返回 None。
+        obj.timestamp = decode_cp56(chunk)
         return
 
 

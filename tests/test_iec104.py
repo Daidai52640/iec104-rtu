@@ -183,6 +183,70 @@ def test_cp56_roundtrip():
            (2026, 10, 17, 18, 14, 16)
 
 
+def test_clock_sync_roundtrip():
+    """C_CS_NA_1（对时）：数据段是纯 7 字节 CP56Time2a，往返应还原到同一时刻。"""
+    from datetime import datetime, timezone
+    dt = datetime(2026, 10, 17, 18, 14, 16, 636000, tzinfo=timezone.utc)
+    got = encode_asdu(int(TypeID.C_CS_NA_1), COT.ACTIVATION, 1,
+                      [InformationObject(0, timestamp=dt)])
+    assert len(got) == 16                 # 6(头) + 3(IOA) + 7(时标)
+    a = decode_asdu(got)
+    assert a is not None
+    assert a.type_id == int(TypeID.C_CS_NA_1)
+    assert a.cot == int(COT.ACTIVATION)
+    assert a.ca == 1
+    assert a.sq is False                  # 默认 SQ=0
+    assert a.objects[0].ioa == 0
+    assert a.objects[0].value is None     # 对时对象只有时标，没有值
+    assert a.objects[0].timestamp == dt   # CP56Time2a 分辨率到毫秒，往返应精确相等
+
+
+def test_clock_sync_matches_handmade_frame():
+    """手拼 C_CS_NA_1 帧逐字节对拍（字节全部按本实现规则手算，不抄抓包）。"""
+    from datetime import datetime, timezone
+    # 67          TypeID = 103(0x67) C_CS_NA_1
+    # 01          VSQ    = SQ=0, n=1（对时只带一个时标对象）
+    # 06 00       COT    = 6（激活）| OA = 0
+    # 01 00       CA     = 1（低字节在前）
+    # 00 00 00    IOA    = 0（低字节在前）
+    # FC 40       毫秒   = 16*1000 + 636 = 16636 = 0x40FC（低字节在前）
+    # 0E 12 11 0A 1A     分=14 时=18 日=17 月=10 年=26（=2026-2000）
+    raw = H("67 01 06 00 01 00 00 00 00 FC 40 0E 12 11 0A 1A")
+    assert len(raw) == 16
+    dt = datetime(2026, 10, 17, 18, 14, 16, 636000, tzinfo=timezone.utc)
+    got = encode_asdu(int(TypeID.C_CS_NA_1), COT.ACTIVATION, 1,
+                      [InformationObject(0, timestamp=dt)])
+    assert got == raw
+    # 反向：手工字节解回来也是同一时刻
+    a = decode_asdu(raw)
+    assert a is not None
+    assert a.type_id == int(TypeID.C_CS_NA_1)
+    assert a.objects[0].timestamp == dt
+
+
+def test_clock_sync_defaults_to_now_utc():
+    """对时对象不给 timestamp 时，按当前 UTC 时刻编码（秒级容差）。"""
+    from datetime import datetime, timezone
+    got = encode_asdu(int(TypeID.C_CS_NA_1), COT.ACTIVATION, 1,
+                      [InformationObject(0)])         # timestamp=None
+    assert len(got) == 16
+    a = decode_asdu(got)
+    assert a is not None
+    ts = a.objects[0].timestamp
+    assert ts is not None and ts.tzinfo is timezone.utc
+    drift = abs(ts.timestamp() - datetime.now(timezone.utc).timestamp())
+    assert drift <= 5.0
+
+
+def test_unknown_type_keeps_raw_tail():
+    """未登记类型仍走 raw_tail 原样保留，不硬解、不抛异常。"""
+    a = decode_asdu(H("FF 01 06 00 01 00 DE AD BE EF"))
+    assert a is not None
+    assert a.type_id == 0xFF
+    assert a.objects == []
+    assert a.raw_tail == H("DE AD BE EF")
+
+
 # ================================================================ 点表
 def test_station_grouping():
     st = Station(1)
