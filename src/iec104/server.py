@@ -16,9 +16,11 @@ import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
+from . import quality as q_
 from .actuator import Actuator, MemoryActuator
 from .asdu import Asdu, InformationObject, decode_asdu, encode_asdu
 from .link import Apdu, decode_apdu, encode_i_frame, encode_s_frame, encode_u_frame, iter_apdus
+from .source import Source
 from .station import Station
 from .consts import BROADCAST_CA, COT, FrameFormat, TypeID, UFrame
 
@@ -267,6 +269,14 @@ class Session(threading.Thread):
             [InformationObject(p.ioa, p.value, p.quality)],
         ))
 
+    def send_spontaneous_points(self, points) -> None:
+        """把一批变化点按突发（COT=3）上送。**每点一帧**，便于日志与排查。"""
+        for p in points:
+            self.send_asdu(encode_asdu(
+                p.type_id, COT.SPONTANEOUS, self.station.ca,
+                [InformationObject(p.ioa, p.value, p.quality)],
+            ))
+
     # ------------------------------------------------------------ 总召唤
     def _do_interrogation(self, req: Asdu) -> None:
         """激活 → 确认 → 数据 → 终止。"""
@@ -314,7 +324,9 @@ class Iec104Slave:
     def __init__(self, station: Station, host: str = "0.0.0.0",
                  port: int = 2404, cyclic_s: float = 0.0, verbose: bool = True,
                  actuator: Optional[Actuator] = None,
-                 select_timeout: float = 30.0) -> None:
+                 select_timeout: float = 30.0,
+                 source: Optional[Source] = None,
+                 poll_s: float = 0.0) -> None:
         self.station = station
         self.host = host
         self.port = port
@@ -322,6 +334,9 @@ class Iec104Slave:
         self.verbose = verbose
         self.actuator = actuator or MemoryActuator()
         self.select_timeout = select_timeout
+        self.source = source
+        self.poll_s = poll_s
+        self._poll_thread: Optional[threading.Thread] = None
 
         self._srv: Optional[socket.socket] = None
         self._sessions: List[Session] = []
@@ -345,6 +360,10 @@ class Iec104Slave:
         if self.cyclic_s > 0:
             self._cyclic_thread = threading.Thread(target=self._cyclic_loop, daemon=True)
             self._cyclic_thread.start()
+
+        if self.source is not None and self.poll_s > 0:
+            self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+            self._poll_thread.start()
 
         if self.verbose:
             print("=" * 68)
@@ -389,5 +408,40 @@ class Iec104Slave:
                 if sess.is_alive():
                     try:
                         sess.send_cyclic_once()
+                    except Exception:
+                        pass
+
+    def _poll_loop(self) -> None:
+        """采集循环：source.poll() → 落点表 → 变化点突发上送。
+
+        ⭐ 品质位规则在这里落地：
+           数据源没返回的点，`Station.apply` 会把它标成 IV（无效），
+           并且因为"品质变了"，会被当成变化点突发上送出去。
+           主站因此能看到"这个点坏了"，而不是继续看到过期的假数。
+        """
+        while self._running:
+            time.sleep(self.poll_s)
+            values = {}
+            try:
+                values = self.source.poll()
+            except Exception as e:
+                if self.verbose:
+                    print(f"    [POLL] 数据源异常: {type(e).__name__}: {e}", flush=True)
+
+            changed = self.station.apply(values)
+            if not changed:
+                continue
+
+            if self.verbose:
+                state = "正常" if values else "❌ 数据源无数据"
+                print(f"    [POLL] {state}｜变化 {len(changed)} 点: "
+                      + ", ".join(f"IOA{p.ioa}={p.value!r}"
+                                  f"({q_.describe(p.quality)})" for p in changed),
+                      flush=True)
+
+            for sess in list(self._sessions):
+                if sess.is_alive() and sess.started:
+                    try:
+                        sess.send_spontaneous_points(changed)
                     except Exception:
                         pass

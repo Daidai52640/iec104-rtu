@@ -5,10 +5,19 @@
 """
 
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .consts import TypeID
+from . import quality as q_
+from .consts import QDS, TypeID
+
+# 可被南向采集更新品质/值的类型。**命令类（C_SC_NA_1 等）不参与。**
+READABLE_TYPES = frozenset({
+    int(TypeID.M_SP_NA_1),
+    int(TypeID.M_SP_TB_1),
+    int(TypeID.M_ME_NA_1),
+    int(TypeID.M_ME_NC_1),
+})
 
 
 @dataclass
@@ -22,13 +31,15 @@ class Point:
     cyclic: bool = False          # True = 参与周期上送（COT=1）
     name: str = ""
     timestamp: Optional[datetime] = None   # 带时标类型（SOE）用
+    updated_at: Optional[datetime] = None  # 最近一次成功采到的时刻
 
     def __repr__(self) -> str:
         try:
             t = TypeID(self.type_id).name
         except ValueError:
             t = str(self.type_id)
-        return f"<Point {self.name or ''} IOA={self.ioa} {t}={self.value!r} q={self.quality:#x}>"
+        return (f"<Point {self.name or ''} IOA={self.ioa} {t}={self.value!r} "
+                f"q={q_.describe(self.quality)}>")
 
 
 @dataclass
@@ -126,3 +137,41 @@ class Station:
 
     def all_bindings(self) -> List[CommandBinding]:
         return [self._bindings[k] for k in sorted(self._bindings)]
+
+    # ------------------------------------------------------------ 数据源落地
+    def apply(self, values: Dict[int, Tuple[Any, int]],
+              now: Optional[datetime] = None) -> List[Point]:
+        """把一轮采集结果落到点表。
+
+        ⭐ 核心纪律：**读不到的点的品质一律置 IV，绝不保留旧值当成好值。**
+           这是"宁缺勿假"的落地——主站宁可看到"无效"，也不能看到过期的假数。
+
+        返回"值或品质发生变化"的点，供上层做突发上送。
+        """
+        now = now or datetime.now(timezone.utc)
+        changed: List[Point] = []
+
+        for p in self.all():
+            # ⚠️ 命令点（C_SC_NA_1 等）不是采集来的，不能被"没读到"标成 IV
+            if p.type_id not in READABLE_TYPES:
+                continue
+
+            if p.ioa in values:
+                value, q = values[p.ioa]
+                q = q_.clear_faults(q)          # 读到了 → 清掉 IV/NT
+                if p.value != value or p.quality != q:
+                    changed.append(p)
+                p.value = value
+                p.quality = q
+                p.updated_at = now
+            else:
+                # 这一轮没读到 → 无效（值保留原样，但品质明确标坏）
+                if not (p.quality & QDS.IV):
+                    p.quality = q_.mark_invalid(p.quality)
+                    changed.append(p)
+
+        return changed
+
+    def invalidate_all(self, now: Optional[datetime] = None) -> List[Point]:
+        """整个子站标为无效（数据源整体故障时用）。"""
+        return self.apply({}, now=now)
