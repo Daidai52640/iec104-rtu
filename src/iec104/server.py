@@ -13,6 +13,7 @@
 import socket
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -51,7 +52,9 @@ class Session(threading.Thread):
 
     def __init__(self, conn: socket.socket, addr, station: Station,
                  verbose: bool = True, actuator: Optional[Actuator] = None,
-                 select_timeout: float = 30.0):
+                 select_timeout: float = 30.0,
+                 k: int = 12, w: int = 8,
+                 t1: float = 15.0, t2: float = 10.0, t3: float = 20.0):
         super().__init__(daemon=True)
         self.conn = conn
         self.addr = addr
@@ -60,13 +63,47 @@ class Session(threading.Thread):
         self.actuator = actuator or MemoryActuator()
         self.select_timeout = select_timeout
 
+        # ---- 链路层参数
+        self.k = k                  # 未确认 I 帧上限（发送窗口）
+        self.w = w                  # 收到这么多 I 帧就发确认
+        self.t1 = t1                # 等确认超时
+        self.t2 = t2                # 延迟确认超时（t2 < t1）
+        self.t3 = t3                # 空闲多久发 TESTFR
+
         self.tx = 0                 # 我们发出的 I 帧序号
         self.rx = 0                 # 我们收到的 I 帧序号（下一个期望值）
+        self.peer_rx = 0            # 对端已确认到我们第几帧（取自对端的 rx 字段）
         self.started = False        # 是否已 STARTDT
         self.closed = False
+        self.abort_reason = ""      # 断链原因（t1/t3 超时填这里）
+
         self._selected = {}         # 遥控选择状态：IOA -> 选择时刻（monotonic）
         self._send_lock = threading.Lock()
         self._buf = bytearray()
+
+        # ---- 发送队列：采集线程也会往里放，所以要加锁；真正的写 socket 只在
+        #      会话线程的 _pump() 里发生，避免跨线程写。
+        self._outq: deque = deque()
+        self._q_lock = threading.Lock()
+
+        # ---- 定时器状态（一律用 monotonic）
+        now = time.monotonic()
+        self._t1_base = now          # 最早未确认 I 帧的发送时刻
+        self._last_send = now        # 最近发出任何帧
+        self._last_recv = now        # 最近收到任何帧
+        self._pending_ack = 0        # 已收到但还没确认的 I 帧数
+        self._test_at: Optional[float] = None   # 发过 TESTFR act 的时刻（等 con）
+
+    # ------------------------------------------------------------ 窗口/序号
+    def _tx_unacked(self) -> int:
+        """窗口已占用多少格：我方已发 vs 对端已确认。
+
+        ⚠️ 对端可能送来"超前"的确认（确认到我们还没发的序号）。
+           按模运算会得到接近 32768 的大数，直接把发送卡死，
+           所以这里把它当 0 处理——宁可多发，不可卡死。
+        """
+        delta = (self.tx - self.peer_rx) % 32768
+        return 0 if delta > 16384 else delta
 
     # ------------------------------------------------------------ 日志
     def _log(self, direction: str, text: str) -> None:
@@ -86,12 +123,36 @@ class Session(threading.Thread):
     def send_u(self, code: int) -> None:
         self._send(encode_u_frame(code))
         self._log("T-->", f"U {UFrame(code).name if code in set(UFrame) else hex(code)}")
+        self._last_send = time.monotonic()
 
     def send_s(self) -> None:
         self._send(encode_s_frame(self.rx))
         self._log("T-->", f"S rx={self.rx}")
+        self._pending_ack = 0
+        self._last_send = time.monotonic()
 
     def send_asdu(self, asdu: bytes) -> None:
+        """把一帧 ASDU 放进发送队列。
+
+        ⚠️ **可从任意线程调用**（采集线程也会放）。
+        真正的 socket 写只发生在会话线程的 `_pump()` 里，
+        这样窗口 K 满时可以排队，也不会跨线程写 socket。
+        """
+        with self._q_lock:
+            self._outq.append(asdu)
+
+    def _pump(self) -> None:
+        """在窗口 K 允许的范围内，把队列里的帧发出去。"""
+        while True:
+            with self._q_lock:
+                if not self._outq or self._tx_unacked() >= self.k:
+                    return
+                asdu = self._outq.popleft()
+            self._send_i(asdu)
+
+    def _send_i(self, asdu: bytes) -> None:
+        if self._tx_unacked() == 0:
+            self._t1_base = time.monotonic()      # 新一轮窗口的计时起点
         frame = encode_i_frame(self.tx, self.rx, asdu)
         self._send(frame)
         a = decode_asdu(asdu)
@@ -99,13 +160,18 @@ class Session(threading.Thread):
                 f"CA={a.ca} n={len(a.objects)} | {_hex(asdu)}") if a else _hex(asdu)
         self._log("T-->", desc)
         self.tx = (self.tx + 1) % 32768
+        self._pending_ack = 0        # I 帧自带 rx，等于顺带确认了收到的帧
+        self._last_send = time.monotonic()
 
     # ------------------------------------------------------------ 主循环
     def run(self) -> None:
         self._log("---", f"连接建立来自 {self.addr}")
-        self.conn.settimeout(0.5)
+        self.conn.settimeout(0.2)      # 0.2s 一拍，兼顾响应速度与定时精度
         try:
             while not self.closed:
+                self._pump()
+                if self._tick():
+                    break
                 try:
                     chunk = self.conn.recv(4096)
                 except socket.timeout:
@@ -124,25 +190,74 @@ class Session(threading.Thread):
                     self._log("<--", f"{apdu!r}" + (f" | {_hex(apdu.asdu)}" if apdu.asdu else ""))
                     try:
                         self._handle(apdu)
-                    except Exception as e:      # 骨架阶段：单帧异常不弄死会话
+                    except Exception as e:      # 单帧异常不弄死会话
                         self._log("ERR", f"处理帧异常: {type(e).__name__}: {e}")
+                self._pump()
         finally:
             self.closed = True
             try:
                 self.conn.close()
             except OSError:
                 pass
-            self._log("---", "连接关闭")
+            tail = f"（{self.abort_reason}）" if self.abort_reason else ""
+            self._log("---", f"连接关闭{tail}")
+
+    # ------------------------------------------------------------ 定时器
+    def _tick(self) -> bool:
+        """检查 t1 / t2 / t3。返回 True 表示该断链了。"""
+        now = time.monotonic()
+
+        # ---- t1：发出 I 帧后迟迟拿不到确认
+        if self._tx_unacked() > 0 and (now - self._t1_base) > self.t1:
+            self._abort(f"t1 超时：{self.t1:.1f}s 未收到确认，窗口占用 {self._tx_unacked()}")
+            return True
+
+        # ---- t2：有未确认的接收 → 攒够 W 个或到点就发 S
+        if self._pending_ack > 0 and (
+                self._pending_ack >= self.w or (now - self._last_recv) >= self.t2):
+            self.send_s()
+
+        # ---- t3：空闲太久发 TESTFR act；发出后按 t1 等 con
+        if self._test_at is None:
+            if (now - max(self._last_send, self._last_recv)) >= self.t3:
+                self.send_u(UFrame.TESTFR_ACT)
+                self._test_at = time.monotonic()
+        elif (now - self._test_at) > self.t1:
+            self._abort(f"TESTFR act 无应答：{self.t1:.1f}s 未收到 con")
+            return True
+
+        return False
+
+    def _abort(self, reason: str) -> None:
+        self.abort_reason = reason
+        self._log("!!!", f"断链：{reason}")
+        self.closed = True
 
     # ------------------------------------------------------------ 帧处理
     def _handle(self, apdu: Apdu) -> None:
+        self._last_recv = time.monotonic()
+        self._test_at = None            # 收到任何帧都证明链路活着
+
         if apdu.is_u:
             self._handle_u(apdu.u_code)
         elif apdu.is_s:
-            # 对端在确认我们发出的 I 帧；骨架阶段只记录
-            pass
+            self._note_ack(apdu.rx)
         else:
+            self._note_ack(apdu.rx)     # I 帧同样携带对端的接收序号
+            self._pending_ack += 1
             self._handle_i(apdu)
+
+    def _note_ack(self, rx: int) -> None:
+        """对端确认到 rx：窗口前移；窗口空了就重置 t1 计时。"""
+        if rx == self.peer_rx:
+            return
+        # 超前确认（确认了我们还没发的序号）不可信，忽略并留痕
+        if ((self.tx - rx) % 32768) > 16384:
+            self._log("!!!", f"忽略异常确认 rx={rx}（我方 tx={self.tx}）")
+            return
+        self.peer_rx = rx
+        if self._tx_unacked() == 0:
+            self._t1_base = time.monotonic()
 
     def _handle_u(self, code: int) -> None:
         if code == UFrame.STARTDT_ACT:
@@ -161,28 +276,24 @@ class Session(threading.Thread):
             return
 
         if asdu.test:
-            self._log("---", "收到 TEST 帧，骨架阶段忽略")
+            self._log("---", "收到 TEST 帧，忽略")
             self.rx = (self.rx + 1) % 32768
-            self.send_s()
             return
 
         # ⭐ 总召唤：TypeID=100, COT=6(激活)
         if asdu.type_id == int(TypeID.C_IC_NA_1) and asdu.cot == COT.ACTIVATION:
             self.rx = (self.rx + 1) % 32768
             self._do_interrogation(asdu)
-            self.send_s()
             return
 
         # 遥控：TypeID=45 —— ⭐ 选择 → 确认；执行 → 确认 + 变位上送
         if asdu.type_id == int(TypeID.C_SC_NA_1):
             self.rx = (self.rx + 1) % 32768
             self._handle_command(asdu)
-            self.send_s()
             return
 
-        # 其它未处理类型：确认收到，避免对端等超时
+        # 其它未处理类型：只记接收序号，由 t2/W 负责回确认
         self.rx = (self.rx + 1) % 32768
-        self.send_s()
 
     # ------------------------------------------------------------ 遥控（选择-执行）
     def _handle_command(self, asdu: Asdu) -> None:
@@ -326,7 +437,9 @@ class Iec104Slave:
                  actuator: Optional[Actuator] = None,
                  select_timeout: float = 30.0,
                  source: Optional[Source] = None,
-                 poll_s: float = 0.0) -> None:
+                 poll_s: float = 0.0,
+                 k: int = 12, w: int = 8,
+                 t1: float = 15.0, t2: float = 10.0, t3: float = 20.0) -> None:
         self.station = station
         self.host = host
         self.port = port
@@ -336,6 +449,11 @@ class Iec104Slave:
         self.select_timeout = select_timeout
         self.source = source
         self.poll_s = poll_s
+        self.k = k
+        self.w = w
+        self.t1 = t1
+        self.t2 = t2
+        self.t3 = t3
         self._poll_thread: Optional[threading.Thread] = None
 
         self._srv: Optional[socket.socket] = None
@@ -345,6 +463,11 @@ class Iec104Slave:
         self._cyclic_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------ 生命周期
+    @property
+    def sessions(self) -> List["Session"]:
+        """当前会话列表（测试与排障用）。"""
+        return [s for s in self._sessions if s.is_alive()]
+
     def start(self) -> None:
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -385,6 +508,14 @@ class Iec104Slave:
                 self._srv.close()
             except OSError:
                 pass
+        # 等会话线程收尾，避免解释器退出时 daemon 线程还在写 stdout
+        deadline = time.monotonic() + 2.0
+        for s in list(self._sessions):
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            s.join(timeout=left)
+        self._sessions = []
 
     # ------------------------------------------------------------ 循环
     def _accept_loop(self) -> None:
@@ -397,7 +528,8 @@ class Iec104Slave:
             except OSError:
                 break
             sess = Session(conn, addr, self.station, verbose=self.verbose,
-                           actuator=self.actuator, select_timeout=self.select_timeout)
+                           actuator=self.actuator, select_timeout=self.select_timeout,
+                           k=self.k, w=self.w, t1=self.t1, t2=self.t2, t3=self.t3)
             self._sessions = [s for s in self._sessions if s.is_alive()] + [sess]
             sess.start()
 
