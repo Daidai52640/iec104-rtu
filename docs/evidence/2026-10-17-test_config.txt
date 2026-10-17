@@ -1,0 +1,29 @@
+  PASS  test_actuator_out_of_range_rejected
+  PASS  test_command_fields_only_on_command_point
+  PASS  test_command_point_requires_actuator
+  PASS  test_common_address_out_of_range_rejected
+  PASS  test_cyclic_command_point_rejected
+  PASS  test_default_config_first_poll_has_no_invalid_point
+  PASS  test_duplicate_ioa_rejected
+  PASS  test_duplicate_source_channel_rejected
+  PASS  test_example_config_equivalent_to_hardcoded_table
+  PASS  test_invalid_ioa_rejected
+  PASS  test_invalid_value_type_rejected
+  PASS  test_json_syntax_error_rejected
+  PASS  test_minimal_config_uses_defaults
+  PASS  test_missing_file_rejected
+  PASS  test_missing_point_field_rejected
+  PASS  test_missing_top_level_field_rejected
+  PASS  test_non_utf8_config_rejected
+  PASS  test_readback_ioa_must_exist
+  PASS  test_readback_must_point_to_single_point
+  PASS  test_source_channel_conflicts_with_command_readback
+  PASS  test_source_channel_only_on_single_point
+  PASS  test_source_channel_out_of_range_rejected
+  PASS  test_top_level_must_be_json_object
+  PASS  test_unknown_point_field_rejected
+  PASS  test_unknown_top_level_field_rejected
+  PASS  test_unknown_type_rejected
+  PASS  test_utf8_bom_and_chinese_text_accepted
+------------------------------------------------------------
+27/27 passed

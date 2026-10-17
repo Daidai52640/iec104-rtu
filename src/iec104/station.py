@@ -50,11 +50,19 @@ class CommandBinding:
     ⭐ 这是"协议层"与"硬件层"的接缝：
         - 现在用内存执行器（无硬件）验证协议
         - 板子到货只换 Actuator 实现，协议层与状态机一行不改
+
+    `mutex_group` / `min_interval` 是**动作约束**的声明（执行前的判定条件）：
+        - `mutex_group`：互斥组名。同组内任一通道当前回读为 ON 时，其它通道拒绝动作；
+        - `min_interval`：本通道两次成功执行之间的最小间隔（秒）。
+          None = 用 `Session.min_interval`（默认 1.0s）；0 = 不限制。
+    ⚠️ 这些条件只做"动作前判断"，不承担功能安全 —— 人身安全靠外部硬件回路。
     """
 
     ioa: int                 # 遥控命令点 IOA（C_SC_NA_1）
     output_index: int        # 执行器通道号（继电器 0~7）
     readback_ioa: Optional[int] = None   # 执行后把回读值写回哪个遥信点
+    mutex_group: Optional[str] = None    # 互斥组名；None = 不参与互斥
+    min_interval: Optional[float] = None # 本通道最小执行间隔（秒）；None = 用会话默认
 
 
 class Station:
@@ -127,11 +135,15 @@ class Station:
 
     # ------------------------------------------------------------ 遥控绑定
     def bind_command(self, ioa: int, output_index: int,
-                     readback_ioa: Optional[int] = None) -> CommandBinding:
-        """把一个遥控点绑定到执行器通道（以及可选的回读遥信点）。"""
+                     readback_ioa: Optional[int] = None,
+                     mutex_group: Optional[str] = None,
+                     min_interval: Optional[float] = None) -> CommandBinding:
+        """把一个遥控点绑定到执行器通道（以及可选的回读遥信点/动作约束）。"""
         if ioa in self._bindings:
             raise ValueError(f"command IOA {ioa} already bound")
-        b = CommandBinding(ioa=ioa, output_index=output_index, readback_ioa=readback_ioa)
+        b = CommandBinding(ioa=ioa, output_index=output_index,
+                           readback_ioa=readback_ioa,
+                           mutex_group=mutex_group, min_interval=min_interval)
         self._bindings[ioa] = b
         return b
 
@@ -164,6 +176,10 @@ class Station:
                 q = q_.clear_faults(q)          # 读到了 → 清掉 IV/NT
                 if p.value != value or p.quality != q:
                     changed.append(p)
+                    # ⭐ 值/品质变了 = 新事件。旧时标属于**上一次**变化，
+                    #    必须清掉，由上送侧按当时的钟（含对时偏移）重新打，
+                    #    否则同一个点第二次变位会沿用第一次的时标。
+                    p.timestamp = None
                 p.value = value
                 p.quality = q
                 p.updated_at = now
@@ -171,6 +187,7 @@ class Station:
                 # 这一轮没读到 → 无效（值保留原样，但品质明确标坏）
                 if not (p.quality & QDS.IV):
                     p.quality = q_.mark_invalid(p.quality)
+                    p.timestamp = None          # 品质变化也是一次新事件，理由同上
                     changed.append(p)
 
         return changed

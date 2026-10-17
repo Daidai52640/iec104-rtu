@@ -1,0 +1,11 @@
+  PASS  test_t1_aborts_when_ack_never_comes
+  PASS  test_t1_not_triggered_when_ack_arrives
+  PASS  test_t2_anchors_on_first_unacked_frame
+  PASS  test_t2_delayed_ack
+  PASS  test_t3_aborts_when_testfr_unanswered
+  PASS  test_t3_sends_testfr_when_idle
+  PASS  test_w_triggers_ack_before_t2
+  PASS  test_window_k_limits_inflight
+  PASS  test_wrong_ns_aborts_session
+------------------------------------------------------------
+9/9 passed

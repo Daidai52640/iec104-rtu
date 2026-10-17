@@ -2,10 +2,12 @@
 
 职责边界（骨架阶段）：
     ✅ 建链（STARTDT）、总召唤（激活/确认/数据/终止）、S 帧确认、TESTFR、周期上送
-    ✅ 收到遥控命令时记录并打日志
-    ⬜ 遥控的「选择-执行」两段式与继电器回读 —— 下一步
+    ✅ 接收序号 N(S) 连续性校验（重放/乱序直接断链）
+    ✅ 遥控「选择-执行」两段式 + 独立回读 + 执行前的动作约束（离线/互斥组/最小间隔）
+    ✅ 对时 C_CS_NA_1（记录偏移、回确认）
+    ✅ SOE 时标上送：线类型由点表声明的 type 决定（M_SP_TB_1 全路径带时标）
     ⬜ 南向 Modbus RTU —— 下一步
-    ⬜ 品质位映射、SOE 时标上送 —— 下一步
+    ⬜ 品质位映射细节（BL/SB 的人工置位）—— 下一步
 
 ⚠️ 不依赖任何第三方 104 库。
 """
@@ -14,16 +16,17 @@ import socket
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 from . import quality as q_
 from .actuator import Actuator, MemoryActuator
 from .asdu import Asdu, InformationObject, decode_asdu, encode_asdu
+from .clock import ClockOffset
 from .link import Apdu, decode_apdu, encode_i_frame, encode_s_frame, encode_u_frame, iter_apdus
 from .source import Source
-from .station import Station
-from .consts import BROADCAST_CA, COT, FrameFormat, TypeID, UFrame
+from .station import CommandBinding, Station
+from .consts import BROADCAST_CA, COT, COT_PN_BIT, QDS, FrameFormat, TypeID, UFrame
 
 
 # ---------------------------------------------------------------- 工具
@@ -53,6 +56,7 @@ class Session(threading.Thread):
     def __init__(self, conn: socket.socket, addr, station: Station,
                  verbose: bool = True, actuator: Optional[Actuator] = None,
                  select_timeout: float = 30.0,
+                 min_interval: float = 1.0,
                  k: int = 12, w: int = 8,
                  t1: float = 15.0, t2: float = 10.0, t3: float = 20.0):
         super().__init__(daemon=True)
@@ -62,6 +66,7 @@ class Session(threading.Thread):
         self.verbose = verbose
         self.actuator = actuator or MemoryActuator()
         self.select_timeout = select_timeout
+        self.min_interval = min_interval    # 同一 IOA 两次成功执行的最小间隔（秒）
 
         # ---- 链路层参数
         self.k = k                  # 未确认 I 帧上限（发送窗口）
@@ -77,7 +82,11 @@ class Session(threading.Thread):
         self.closed = False
         self.abort_reason = ""      # 断链原因（t1/t3 超时填这里）
 
-        self._selected = {}         # 遥控选择状态：IOA -> 选择时刻（monotonic）
+        self._selected: Dict[int, Tuple[float, bool, bool]] = {}
+        # 遥控选择状态：IOA -> (选择时刻 monotonic, 预演的 SCS 值, 选择位)
+        # ⭐ 存值是为了执行时校验：选择是"预演"，执行与预演不一致绝不能动作。
+        self._last_exec: Dict[int, float] = {}   # IOA -> 上次成功执行时刻（monotonic）
+        self.clock = ClockOffset()  # 对时偏移（SOE 打时标用）
         self._send_lock = threading.Lock()
         self._buf = bytearray()
 
@@ -92,6 +101,7 @@ class Session(threading.Thread):
         self._last_send = now        # 最近发出任何帧
         self._last_recv = now        # 最近收到任何帧
         self._pending_ack = 0        # 已收到但还没确认的 I 帧数
+        self._t2_anchor: Optional[float] = None  # 第一帧未确认 I 帧到达的时刻（t2 锚点）
         self._test_at: Optional[float] = None   # 发过 TESTFR act 的时刻（等 con）
 
     # ------------------------------------------------------------ 窗口/序号
@@ -129,6 +139,7 @@ class Session(threading.Thread):
         self._send(encode_s_frame(self.rx))
         self._log("T-->", f"S rx={self.rx}")
         self._pending_ack = 0
+        self._t2_anchor = None          # 确认发过了，t2 重新从下一轮算
         self._last_send = time.monotonic()
 
     def send_asdu(self, asdu: bytes) -> None:
@@ -161,6 +172,7 @@ class Session(threading.Thread):
         self._log("T-->", desc)
         self.tx = (self.tx + 1) % 32768
         self._pending_ack = 0        # I 帧自带 rx，等于顺带确认了收到的帧
+        self._t2_anchor = None       # 同上：本轮已确认，t2 重新开始
         self._last_send = time.monotonic()
 
     # ------------------------------------------------------------ 主循环
@@ -192,9 +204,12 @@ class Session(threading.Thread):
                         self._handle(apdu)
                     except Exception as e:      # 单帧异常不弄死会话
                         self._log("ERR", f"处理帧异常: {type(e).__name__}: {e}")
+                    if self.closed:             # 已断链：同一批里的后续帧不再处理
+                        break
                 self._pump()
         finally:
             self.closed = True
+            self._selected.clear()      # 会话结束：未执行的选择一律作废
             try:
                 self.conn.close()
             except OSError:
@@ -212,10 +227,15 @@ class Session(threading.Thread):
             self._abort(f"t1 超时：{self.t1:.1f}s 未收到确认，窗口占用 {self._tx_unacked()}")
             return True
 
-        # ---- t2：有未确认的接收 → 攒够 W 个或到点就发 S
-        if self._pending_ack > 0 and (
-                self._pending_ack >= self.w or (now - self._last_recv) >= self.t2):
-            self.send_s()
+        # ---- t2：有未确认的接收 → 攒够 W 个或从**第一帧未确认 I 帧**起算 t2 到点
+        # ⚠️ 锚点必须是 `_t2_anchor`，不能用 `_last_recv`：后者每收到任何帧都刷新，
+        #    主站慢速点滴（比如 1 帧/3s）时 S 帧会被无限推后，
+        #    主站侧 t1 先超时断链 —— 现场表现是"慢速数据偶尔掉线"，极难查。
+        if self._pending_ack > 0:
+            if self._pending_ack >= self.w:
+                self.send_s()
+            elif self._t2_anchor is not None and (now - self._t2_anchor) >= self.t2:
+                self.send_s()
 
         # ---- t3：空闲太久发 TESTFR act；发出后按 t1 等 con
         if self._test_at is None:
@@ -243,8 +263,18 @@ class Session(threading.Thread):
         elif apdu.is_s:
             self._note_ack(apdu.rx)
         else:
+            # ⭐ 先校验接收序号 N(S)：重放 / 乱序 / 重复帧会让 rx 失步，
+            #    之后所有确认全部错位。宁可直接断链，也不带着错位的序号跑。
+            #    （与 lib60870 行为一致）
+            if apdu.tx != self.rx:
+                self._abort(f"N(S) 不连续：期望 {self.rx} 收到 {apdu.tx}")
+                return
             self._note_ack(apdu.rx)     # I 帧同样携带对端的接收序号
+            first_unacked = self._pending_ack == 0
             self._pending_ack += 1
+            if first_unacked:
+                # t2 锚点 = 第一帧未确认 I 帧到达的时刻（收到后续帧不刷新它）
+                self._t2_anchor = time.monotonic()
             self._handle_i(apdu)
 
     def _note_ack(self, rx: int) -> None:
@@ -266,6 +296,10 @@ class Session(threading.Thread):
         elif code == UFrame.STOPDT_ACT:
             self.send_u(UFrame.STOPDT_CON)
             self.started = False
+            # STOPDT 后链路停传，未执行的选择作废：再 STARTDT 必须先重新选择
+            if self._selected:
+                self._log("CMD", f"STOPDT：作废 {len(self._selected)} 个未执行的选择")
+                self._selected.clear()
         elif code == UFrame.TESTFR_ACT:
             self.send_u(UFrame.TESTFR_CON)
 
@@ -292,46 +326,125 @@ class Session(threading.Thread):
             self._handle_command(asdu)
             return
 
+        # 对时：TypeID=103, COT=6(激活) —— 记录偏移 + 回确认（回显时标）
+        if asdu.type_id == int(TypeID.C_CS_NA_1) and asdu.cot == COT.ACTIVATION:
+            self.rx = (self.rx + 1) % 32768
+            self._handle_clock_sync(asdu, apdu.asdu)
+            return
+
         # 其它未处理类型：只记接收序号，由 t2/W 负责回确认
         self.rx = (self.rx + 1) % 32768
 
     # ------------------------------------------------------------ 遥控（选择-执行）
     def _handle_command(self, asdu: Asdu) -> None:
-        """C_SC_NA_1 两段式。
+        """C_SC_NA_1 两段式 + 执行前的动作约束。
 
         ⭐ 两段式的意义：防误操作。手一抖点错了，第一步就停住。
+        ⭐ 执行必须与选择**同值**：选择是"预演"，执行与预演不一致一律拒绝
+           （`value_mismatch`）—— 先选"合"再执行"分"绝不能真的动。
+        ⭐ 执行前还有四条**动作约束**（顺序判定，任一不满足就否定确认且不驱动执行器）：
+            ① IOA 未绑定遥控（本函数开头）
+            ② 设备离线：回读点品质带 IV
+            ③ 互斥组：同组内其它通道当前回读为 ON
+            ④ 最小间隔：同一 IOA 距上次成功执行不足 min_interval
+        ⚠️ 这些是"动作前判断"，秒级，不承担功能安全 —— 人身安全靠外部硬件回路。
         """
         ca = self.station.ca
         for obj in asdu.objects:
             binding = self.station.binding(obj.ioa)
             if binding is None:
-                self._log("CMD", f"拒绝：IOA={obj.ioa} 未绑定遥控")
+                self._log("CMD", f"拒绝（unbound）：IOA={obj.ioa} 未绑定遥控")
                 self._reply_command(obj, ca, negative=True)
                 continue
 
             if obj.select:
-                # ① 选择：记下时刻，回肯定确认
-                self._selected[obj.ioa] = time.monotonic()
+                # ① 选择：记下时刻**与预演的值**，回肯定确认
+                self._selected[obj.ioa] = (time.monotonic(), bool(obj.value), True)
                 self._log("CMD", f"选择 IOA={obj.ioa} -> 确认（等待执行）")
                 self._reply_command(obj, ca, negative=False)
                 continue
 
             # ② 执行：必须有未超时的选择
-            t = self._selected.pop(obj.ioa, None)
-            if t is None:
-                self._log("CMD", f"拒绝：IOA={obj.ioa} 未先选择")
+            entry = self._selected.pop(obj.ioa, None)
+            if entry is None:
+                self._log("CMD", f"拒绝（no_select）：IOA={obj.ioa} 未先选择")
                 self._reply_command(obj, ca, negative=True)
                 continue
-            if (time.monotonic() - t) > self.select_timeout:
-                self._log("CMD", f"拒绝：IOA={obj.ioa} 选择超时"
+            select_at, select_value, _select_bit = entry
+            if (time.monotonic() - select_at) > self.select_timeout:
+                self._log("CMD", f"拒绝（select_timeout）：IOA={obj.ioa} 选择超时"
                                  f"（>{self.select_timeout:.0f}s）")
+                self._reply_command(obj, ca, negative=True)
+                continue
+
+            # ⭐ 执行值必须等于选择时预演的值（选择-执行闭环）
+            if bool(obj.value) != select_value:
+                self._log("CMD", f"拒绝（value_mismatch）：IOA={obj.ioa} "
+                                 f"选择 {select_value} 执行 {bool(obj.value)}")
+                self._reply_command(obj, ca, negative=True)
+                continue
+
+            # ③ 动作约束：任一不满足就不驱动执行器
+            blocked = self._check_constraints(binding)
+            if blocked is not None:
+                reason, detail = blocked
+                # ⚠️ 拒绝原因要能一眼区分（排查时先看括号里的短码，再看细节）
+                self._log("CMD", f"拒绝（{reason}）：IOA={obj.ioa} {detail}")
                 self._reply_command(obj, ca, negative=True)
                 continue
 
             ok = self._execute(binding, obj.value)
             self._reply_command(obj, ca, negative=not ok)
             if ok:
+                self._last_exec[obj.ioa] = time.monotonic()
                 self._send_spontaneous(binding.readback_ioa)
+
+    def _check_constraints(self, binding: CommandBinding) -> Optional[Tuple[str, str]]:
+        """执行前的动作约束判定。
+
+        返回 `None` 表示可以执行；否则返回 `(短码, 人话细节)`，短码用于日志区分：
+            offline  回读点品质带 IV（不知道现场是什么状态，不能动）
+            mutex    互斥组内其它通道当前为 ON
+            interval 距上次成功执行太近
+        """
+        # ---- ① 设备离线：回读点带 IV → 现场状态不可知，绝不能动
+        if binding.readback_ioa is not None:
+            p = self.station.get(binding.readback_ioa)
+            if p is not None and (p.quality & QDS.IV):
+                return "offline", (f"回读点 IOA={p.ioa} 品质 "
+                                   f"{q_.describe(p.quality)}（设备离线，禁止动作）")
+
+        # ---- ② 互斥组：同组内**其它**通道当前回读为 ON → 拒绝
+        if binding.mutex_group is not None:
+            for other in self.station.all_bindings():
+                if other.ioa == binding.ioa or other.mutex_group != binding.mutex_group:
+                    continue
+                if self._channel_readback_on(other):
+                    return "mutex", (f"互斥组 {binding.mutex_group!r} 内 IOA={other.ioa}"
+                                     f"（通道 {other.output_index}）当前为 ON")
+
+        # ---- ③ 最小间隔：同一 IOA 距上次成功执行不足 min_interval
+        last = self._last_exec.get(binding.ioa)
+        if last is not None:
+            limit = (binding.min_interval if binding.min_interval is not None
+                     else self.min_interval)
+            gap = time.monotonic() - last
+            if gap < limit:
+                return "interval", f"距上次成功执行 {gap:.2f}s < {limit:.2f}s（最小间隔）"
+
+        return None
+
+    def _channel_readback_on(self, binding: CommandBinding) -> bool:
+        """某个通道当前是不是 ON。
+
+        优先看该通道的遥信点（协议侧看到的状态），没绑回读点就直接问执行器。
+        ⚠️ 读不到按"不是 ON"处理 —— 互斥判定只拦"确信为 ON"的情况。
+        """
+        if binding.readback_ioa is not None:
+            p = self.station.get(binding.readback_ioa)
+            if p is not None:
+                return bool(p.value)
+        return bool(self.actuator.readback(binding.output_index))
 
     def _reply_command(self, obj: InformationObject, ca: int, negative: bool) -> None:
         """回命令确认：TypeID 相同、COT=7；negative 时置 P/N 位。"""
@@ -363,30 +476,103 @@ class Session(threading.Thread):
             p = self.station.get(binding.readback_ioa)
             if p is not None:
                 p.value = bool(rb)
-                p.timestamp = datetime.now(timezone.utc)
+                # 时标取"对时后的钟"，这样 SOE 与主站时间对齐（秒级）
+                p.timestamp = self.clock.now()
 
         self._log("CMD", f"执行成功：通道 {idx} -> {bool(value)}（回读一致）")
         return True
 
+    # ------------------------------------------------------------ 突发上送（SOE）
+    def _point_timestamp(self, p) -> datetime:
+        """给**带时标类型**的点打时标：点表里已有（刚变位时记的）就用它，
+        否则取当前的钟（含对时偏移）。
+
+        取完写回点表：同一事件被多个会话上送时用同一个时标。
+        """
+        ts = p.timestamp or self.clock.now()
+        p.timestamp = ts
+        return ts
+
+    def _info_object(self, p) -> InformationObject:
+        """点表对象 → ASDU 信息对象。
+
+        ⭐ **线类型完全由点表声明的 type 决定**：
+           - `M_SP_NA_1`(1)：不带时标（总召唤 / 突发 / 周期都是 1）
+           - `M_SP_TB_1`(30)：带 CP56Time2a 时标（总召唤 / 突发 / 周期都是 30）
+        ⚠️ 只有 30 才附时标；遥测（M_ME_NC_1）等类型保持原样。
+        """
+        if p.type_id == int(TypeID.M_SP_TB_1):
+            return InformationObject(p.ioa, p.value, p.quality,
+                                     timestamp=self._point_timestamp(p))
+        return InformationObject(p.ioa, p.value, p.quality)
+
+    def _spont_frame(self, p) -> bytes:
+        """一个变化点的突发帧（COT=3），类型跟点表声明走。
+
+        ⚠️ 同一个点**不能**"总召唤发一种类型、突发发另一种"：主站按点表配的
+           类型收帧，类型对不上会当成未知点直接丢弃 —— 变位就丢了（互操作实测踩过）。
+        """
+        return encode_asdu(
+            p.type_id, COT.SPONTANEOUS, self.station.ca,
+            [self._info_object(p)],
+        )
+
     def _send_spontaneous(self, ioa: Optional[int]) -> None:
-        """执行成功后主动上送变位（COT=3 突发）。"""
+        """执行成功后主动上送变位（COT=3 突发，类型跟点表声明走）。"""
         if ioa is None:
             return
         p = self.station.get(ioa)
         if p is None:
             return
-        self.send_asdu(encode_asdu(
-            int(TypeID.M_SP_NA_1), COT.SPONTANEOUS, self.station.ca,
-            [InformationObject(p.ioa, p.value, p.quality)],
-        ))
+        self.send_asdu(self._spont_frame(p))
 
     def send_spontaneous_points(self, points) -> None:
         """把一批变化点按突发（COT=3）上送。**每点一帧**，便于日志与排查。"""
         for p in points:
-            self.send_asdu(encode_asdu(
-                p.type_id, COT.SPONTANEOUS, self.station.ca,
-                [InformationObject(p.ioa, p.value, p.quality)],
-            ))
+            self.send_asdu(self._spont_frame(p))
+
+    # ------------------------------------------------------------ 对时
+    def _handle_clock_sync(self, asdu: Asdu, raw_asdu: bytes) -> None:
+        """C_CS_NA_1 对时：记录偏移 → 回确认（回显收到的时标）。
+
+        ⚠️ 时标缺失/非法（CP56Time2a 解不出来，例如全 0）时回**否定确认**，
+           并把收到的 IOC（IOA + 7 字节时标）原样回显 —— 子站不能假装收到了
+           一个自己看不懂的时刻，但也不能对主站的报文"装死"。
+        """
+        obj = asdu.objects[0] if asdu.objects else None
+        ts = obj.timestamp if obj is not None else None
+        if ts is None:
+            self._log("TIME", "对时帧时标非法/缺失（CP56Time2a 解析失败），回否定确认")
+            self.send_asdu(self._clock_confirm_raw(raw_asdu, negative=True))
+            return
+
+        offset = self.clock.update(ts)
+        self._log("TIME", f"对时：主站时标 {ts.isoformat()}，偏移 {offset:+.3f}s")
+        if abs(offset) > 5.0:
+            self._log("WARN", f"时钟偏移 {offset:+.3f}s 超过 5s：两端时钟源可能不一致")
+
+        # 回确认：TypeID 不变、COT=7、**回显收到的时标与 IOA**
+        self.send_asdu(encode_asdu(
+            int(TypeID.C_CS_NA_1), COT.ACTIVATION_CONFIRM, self.station.ca,
+            [InformationObject(obj.ioa, timestamp=ts)],
+        ))
+
+    def _clock_confirm_raw(self, raw_asdu: bytes, negative: bool) -> bytes:
+        """拼 103 的确认帧：**IOC 原样照抄**（时标非法/缺失时用）。
+
+        ⚠️ 为什么不走 `encode_asdu`：`asdu.py` 里 103 的编码只能把 datetime
+           编成一个**合法**时标（timestamp=None 会取当前 UTC），做不到原样
+           回显一个非法/缺失的 CP56Time2a。这里只换 COT 字节（可置 P/N），
+           其余 CA/IOA/时标与收到的报文逐字节一致。
+        """
+        ca = self.station.ca
+        cot = int(COT.ACTIVATION_CONFIRM) | (COT_PN_BIT if negative else 0)
+        header = bytes((int(TypeID.C_CS_NA_1), 0x01, cot, 0x00,
+                        ca & 0xFF, (ca >> 8) & 0xFF))
+        ioc = raw_asdu[6:16]           # 第一个对象的 IOC：IOA(3) + CP56(7)
+        if len(ioc) < 10:
+            ioc = bytes(10)            # 报文被截断：补 0，至少有 IE 与 IOC 长度
+        return header + ioc
 
     # ------------------------------------------------------------ 总召唤
     def _do_interrogation(self, req: Asdu) -> None:
@@ -401,11 +587,12 @@ class Session(threading.Thread):
             [InformationObject(0, qoi)],
         ))
 
-        # ② 数据上送（COT=20），按 IOA 连续性用 SQ=1 打包
+        # ② 数据上送（COT=20），按类型 + IOA 连续性用 SQ=1 打包
+        # ⚠️ 类型由点表声明决定：M_SP_NA_1 发 1（不带时标），M_SP_TB_1 发 30（带时标）
         for group in self.station.interrogation_groups():
             self.send_asdu(encode_asdu(
                 group[0].type_id, COT.INTERROGATED_BY_STATION, ca,
-                [InformationObject(p.ioa, p.value, p.quality) for p in group],
+                [self._info_object(p) for p in group],
                 sq=len(group) > 1,
             ))
 
@@ -419,13 +606,18 @@ class Session(threading.Thread):
     def send_cyclic_once(self) -> None:
         if not (self.started and not self.closed):
             return
-        groups = Station.group_consecutive(self.station.cyclic_points())
-        for group in groups:
-            self.send_asdu(encode_asdu(
-                group[0].type_id, COT.PERIODIC, self.station.ca,
-                [InformationObject(p.ioa, p.value, p.quality) for p in group],
-                sq=len(group) > 1,
-            ))
+        # ⚠️ 先按**类型**分组再按 IOA 连续性打包：SQ=1 的一帧只能有一种 TypeID，
+        #    混着打包会把不同声明的点按第一个点的类型编出去。
+        by_type: Dict[int, List] = {}
+        for p in self.station.cyclic_points():
+            by_type.setdefault(p.type_id, []).append(p)
+        for type_id in sorted(by_type):
+            for group in Station.group_consecutive(by_type[type_id]):
+                self.send_asdu(encode_asdu(
+                    type_id, COT.PERIODIC, self.station.ca,
+                    [self._info_object(p) for p in group],
+                    sq=len(group) > 1,
+                ))
 
 
 # ---------------------------------------------------------------- 服务端
@@ -439,7 +631,8 @@ class Iec104Slave:
                  source: Optional[Source] = None,
                  poll_s: float = 0.0,
                  k: int = 12, w: int = 8,
-                 t1: float = 15.0, t2: float = 10.0, t3: float = 20.0) -> None:
+                 t1: float = 15.0, t2: float = 10.0, t3: float = 20.0,
+                 min_interval: float = 1.0) -> None:
         self.station = station
         self.host = host
         self.port = port
@@ -447,6 +640,7 @@ class Iec104Slave:
         self.verbose = verbose
         self.actuator = actuator or MemoryActuator()
         self.select_timeout = select_timeout
+        self.min_interval = min_interval      # 同一 IOA 两次成功执行的最小间隔（秒）
         self.source = source
         self.poll_s = poll_s
         self.k = k
@@ -529,6 +723,7 @@ class Iec104Slave:
                 break
             sess = Session(conn, addr, self.station, verbose=self.verbose,
                            actuator=self.actuator, select_timeout=self.select_timeout,
+                           min_interval=self.min_interval,
                            k=self.k, w=self.w, t1=self.t1, t2=self.t2, t3=self.t3)
             self._sessions = [s for s in self._sessions if s.is_alive()] + [sess]
             sess.start()

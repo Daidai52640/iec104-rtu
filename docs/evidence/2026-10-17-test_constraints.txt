@@ -1,0 +1,11 @@
+  PASS  test_config_declares_constraints
+  PASS  test_config_rejects_bad_min_interval
+  PASS  test_config_rejects_bad_mutex_group
+  PASS  test_min_interval_rejected
+  PASS  test_mutex_group_rejected
+  PASS  test_offline_readback_rejected
+  PASS  test_reason_codes_are_distinct
+  PASS  test_select_value_mismatch_rejected
+  PASS  test_unbound_ioa_rejected
+------------------------------------------------------------
+9/9 passed

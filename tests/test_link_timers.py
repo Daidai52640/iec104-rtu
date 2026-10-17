@@ -12,12 +12,13 @@ import os
 import select
 import socket
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
 from iec104 import (  # noqa: E402
-    Iec104Slave, MemoryActuator, Station, TypeID, decode_apdu,
+    Iec104Slave, MemoryActuator, Station, TypeID, decode_apdu, iter_apdus,
 )
 
 CA = 1
@@ -27,9 +28,13 @@ TESTFR_ACT = bytes.fromhex("680443000000")
 TESTFR_CON = bytes.fromhex("680483000000")
 GI_FRAME = bytes.fromhex("680E0000000064010600FFFF00000014")
 
-# 未处理的类型（对时 C_CS_NA_1）——子站不回复，用来观察 t2 / W 的行为
-UNHANDLED_T1 = bytes.fromhex("681400000000" "6701060001000000000000000000000000")
-UNHANDLED_T2 = bytes.fromhex("681402000000" "6701060001000000000000000000000000")
+# 真正"没人处理"的类型：TypeID=121（不在 1/13/30/45/100/103 之内）——
+# 子站不解码、不回复，只记接收序号，正好用来观察 t2 / W 的确认行为。
+# ⚠️ 以前这里用的是 C_CS_NA_1（对时），那属于拿真实协议帧当测试道具：
+#    对时接进会话后子站会对它回确认，t2/W 用例就被顺带确认掉了。
+UNHANDLED_T1 = bytes.fromhex("681400000000" "7901060001000000000000000000000000")
+UNHANDLED_T2 = bytes.fromhex("681402000000" "7901060001000000000000000000000000")
+UNHANDLED_T3 = bytes.fromhex("681404000000" "7901060001000000000000000000000000")
 
 
 def free_port() -> int:
@@ -261,6 +266,72 @@ def test_w_triggers_ack_before_t2():
         assert sfs, "第 W 个 I 帧后应确认"
         assert elapsed < 2.0, f"确认太慢（{elapsed:.2f}s）"
         assert sfs[0].rx == 2, f"应确认到 2，实际 {sfs[0].rx}"
+    finally:
+        h.close()
+
+
+def test_t2_anchors_on_first_unacked_frame():
+    """⭐ t2 锚点 = 第一帧未确认 I 帧到达的时刻，不是"最近收到帧"。
+
+    慢速点滴场景：每 0.8s 一帧、t2=0.3s。
+    正确：第 1 帧后一个 0.2s 定时拍内就发 S 帧（实测约 0.4s，第 2 帧 0.8s 才来），
+          且此时只确认到 rx=1。
+    旧实现：每收一帧就刷新 `_last_recv`，S 帧被推到第 2 帧之后 ——
+    主站侧 t1 先超时断链，现场表现是"慢速数据偶尔掉线"。
+    """
+    h = Harness(t1=60, t2=0.3, t3=60, w=8)
+    try:
+        h.sock.sendall(UNHANDLED_T1)       # 第 1 帧（tx=0），t2 从此刻起算
+        t0 = time.time()
+
+        def drip():
+            for frame in (UNHANDLED_T2, UNHANDLED_T3):
+                time.sleep(0.8)
+                h.sock.sendall(frame)
+
+        threading.Thread(target=drip, daemon=True).start()
+
+        first_s = None       # 第一帧 S 帧到达的相对时刻
+        first_s_rx = None
+        buf = bytearray()
+        end = t0 + 2.2
+        while time.time() < end:
+            r, _, _ = select.select([h.sock], [], [], 0.03)
+            if not r:
+                continue
+            chunk = h.sock.recv(65536)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            for frame in iter_apdus(buf):
+                a = decode_apdu(frame)
+                if a is not None and a.is_s and first_s is None:
+                    first_s = time.time() - t0
+                    first_s_rx = a.rx
+
+        assert first_s is not None, "t2 到点应发 S 帧"
+        assert first_s < 0.8, (
+            f"S 帧应在第 2 帧之前（t2=0.3s + 一个 0.2s 定时拍）出现，实际 {first_s:.2f}s；"
+            f"≥0.8s 说明 t2 锚点被后续帧刷新了")
+        assert first_s >= 0.2, f"S 帧来得太早（{first_s:.2f}s），说明没走 t2"
+        assert first_s_rx == 1, f"此时只该确认到 1，实际 {first_s_rx}"
+    finally:
+        h.close()
+
+
+def test_wrong_ns_aborts_session():
+    """接收序号 N(S) 不连续（重放 / 乱序 / fuzz）→ 直接断链。
+
+    连接上期望 N(S)=0，却收到一帧 tx=2 的 I 帧（UNHANDLED_T3 的控制域是 04 00）。
+    序号失步会让后续所有确认错位，所以必须断链重来，不能"继续猜"。
+    """
+    h = Harness(t1=60, t2=0.3, t3=60)
+    try:
+        h.sock.sendall(UNHANDLED_T3)       # tx=2，跳过了 0/1
+        assert wait_closed(h.sock, timeout=2.0), "N(S) 不连续应直接断链"
+        reasons = [s.abort_reason for s in h.slave._sessions if s.abort_reason]
+        assert any("N(S)" in r for r in reasons), reasons
+        assert any("期望 0" in r and "收到 2" in r for r in reasons), reasons
     finally:
         h.close()
 

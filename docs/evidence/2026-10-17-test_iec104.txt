@@ -1,0 +1,27 @@
+  PASS  test_clock_sync_defaults_to_now_utc
+  PASS  test_clock_sync_matches_handmade_frame
+  PASS  test_clock_sync_roundtrip
+  PASS  test_cp56_roundtrip
+  PASS  test_decode_interrogation_activation_broadcast
+  PASS  test_decode_single_command_select_execute_bit
+  PASS  test_decode_u_frames
+  PASS  test_encode_float_matches_capture
+  PASS  test_encode_interrogation_confirm_matches_capture
+  PASS  test_encode_interrogation_termination_matches_capture
+  PASS  test_encode_single_point_matches_capture
+  PASS  test_float_is_little_endian
+  PASS  test_i_frame_roundtrip
+  PASS  test_i_frame_seq_encoding
+  PASS  test_iter_apdus_skips_garbage
+  PASS  test_iter_apdus_streaming
+  PASS  test_s_frame_matches_capture
+  PASS  test_seq_wraps_at_32768
+  PASS  test_sq0_multi_object_encodes_each_ioa
+  PASS  test_sq1_multi_object_encodes_single_ioa
+  PASS  test_sq1_rejects_non_consecutive_ioa
+  PASS  test_station_grouping
+  PASS  test_station_rejects_duplicate_ioa
+  PASS  test_u_frames_match_capture
+  PASS  test_unknown_type_keeps_raw_tail
+------------------------------------------------------------
+25/25 passed

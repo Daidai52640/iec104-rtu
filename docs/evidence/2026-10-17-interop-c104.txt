@@ -7,15 +7,14 @@
    IOA 6    M_SP_NA_1    DI2        = False
 等待主站连接…  Ctrl+C 停止
 ====================================================================
-18:34:21 --- 连接建立来自 ('127.0.0.1', 53182)
-18:34:21 <-- <U STARTDT_ACT>
-18:34:21 T--> U STARTDT_CON
-18:34:21 <-- <I tx=0 rx=0 asdu=10B> | 64 01 06 00 FF FF 00 00 00 14
-18:34:21 T--> I tx=0 rx=1 | C_IC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 64 01 07 00 01 00 00 00 00 14
-18:34:21 T--> I tx=1 rx=1 | M_SP_NA_1 INTERROGATED_BY_STATION CA=1 n=2 | 01 82 14 00 01 00 05 00 00 01 00
-18:34:21 T--> I tx=2 rx=1 | M_ME_NC_1 INTERROGATED_BY_STATION CA=1 n=2 | 0D 82 14 00 01 00 01 00 00 9A 99 BD 41 00 9A 99 79 42 00
-18:34:21 T--> I tx=3 rx=1 | C_IC_NA_1 ACTIVATION_TERMINATION CA=1 n=1 | 64 01 0A 00 01 00 00 00 00 14
-18:34:21 T--> S rx=1
+22:34:21 --- 连接建立来自 ('127.0.0.1', 63239)
+22:34:21 <-- <U STARTDT_ACT>
+22:34:21 T--> U STARTDT_CON
+22:34:21 <-- <I tx=0 rx=0 asdu=10B> | 64 01 06 00 FF FF 00 00 00 14
+22:34:21 T--> I tx=0 rx=1 | C_IC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 64 01 07 00 01 00 00 00 00 14
+22:34:21 T--> I tx=1 rx=1 | M_SP_NA_1 INTERROGATED_BY_STATION CA=1 n=2 | 01 82 14 00 01 00 05 00 00 01 00
+22:34:21 T--> I tx=2 rx=1 | M_ME_NC_1 INTERROGATED_BY_STATION CA=1 n=2 | 0D 82 14 00 01 00 01 00 00 9A 99 BD 41 00 9A 99 79 42 00
+22:34:21 T--> I tx=3 rx=1 | C_IC_NA_1 ACTIVATION_TERMINATION CA=1 n=1 | 64 01 0A 00 01 00 00 00 00 14
 
 ==================================================================
 互操作结果
@@ -30,8 +29,8 @@ state     : ConnectionState.OPEN
          quality=Quality set: {}, is_good: True
   IOA 6: value=False                  expect=False    OK
          quality=Quality set: {}, is_good: True
-18:34:21 <-- <S rx=4>
-18:34:21 --- 连接关闭
+22:34:21 <-- <S rx=4>
+22:34:21 --- 连接关闭
 ==================================================================
 RESULT: PASS ✅
 ==================================================================

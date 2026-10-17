@@ -6,6 +6,6 @@
     {"ioa": 2, "type": "M_ME_NC_1", "name": "Humidity", "value": 62.4, "cyclic": true},
     {"ioa": 5, "type": "M_SP_NA_1", "name": "DI1", "value": false},
     {"ioa": 6, "type": "M_SP_NA_1", "name": "DI2", "value": true, "source_channel": 1},
-    {"ioa": 10, "type": "C_SC_NA_1", "name": "DO1", "value": false, "actuator": 0, "readback_ioa": 5}
+    {"ioa": 10, "type": "C_SC_NA_1", "name": "DO1", "value": false, "actuator": 0, "readback_ioa": 5, "mutex_group": "relay"}
   ]
 }

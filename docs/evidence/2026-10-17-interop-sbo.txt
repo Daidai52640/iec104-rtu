@@ -6,50 +6,43 @@
    IOA 10   C_SC_NA_1    DO1        = False
 等待主站连接…  Ctrl+C 停止
 ====================================================================
-19:05:13 --- 连接建立来自 ('127.0.0.1', 65364)
-19:05:13 <-- <U STARTDT_ACT>
-19:05:13 T--> U STARTDT_CON
-19:05:13 <-- <I tx=0 rx=0 asdu=10B> | 64 01 06 00 FF FF 00 00 00 14
-19:05:13 T--> I tx=0 rx=1 | C_IC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 64 01 07 00 01 00 00 00 00 14
-19:05:13 T--> I tx=1 rx=1 | M_SP_NA_1 INTERROGATED_BY_STATION CA=1 n=2 | 01 82 14 00 01 00 05 00 00 00 01
-19:05:13 T--> I tx=2 rx=1 | C_IC_NA_1 ACTIVATION_TERMINATION CA=1 n=1 | 64 01 0A 00 01 00 00 00 00 14
-19:05:13 T--> S rx=1
+22:34:22 --- 连接建立来自 ('127.0.0.1', 63242)
+22:34:22 <-- <U STARTDT_ACT>
+22:34:22 T--> U STARTDT_CON
+22:34:22 <-- <I tx=0 rx=0 asdu=10B> | 64 01 06 00 FF FF 00 00 00 14
+22:34:22 T--> I tx=0 rx=1 | C_IC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 64 01 07 00 01 00 00 00 00 14
+22:34:22 T--> I tx=1 rx=1 | M_SP_NA_1 INTERROGATED_BY_STATION CA=1 n=2 | 01 82 14 00 01 00 05 00 00 00 01
+22:34:22 T--> I tx=2 rx=1 | C_IC_NA_1 ACTIVATION_TERMINATION CA=1 n=1 | 64 01 0A 00 01 00 00 00 00 14
 
 [1] 连接 = True | 初始 DI1(IOA5) = False | 执行器 = [False, False, False, False, False, False, False, False]
 
 [2] 主站发遥控：SELECT_AND_EXECUTE，值=合
-19:05:13 <-- <I tx=1 rx=3 asdu=10B> | 2D 01 06 00 01 00 0A 00 00 81
-19:05:13 CMD 选择 IOA=10 -> 确认（等待执行）
-19:05:13 T--> I tx=3 rx=2 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 81
-19:05:13 T--> S rx=2
-19:05:13 <-- <I tx=2 rx=4 asdu=10B> | 2D 01 06 00 01 00 0A 00 00 01
-19:05:13 CMD 执行成功：通道 0 -> True（回读一致）
-19:05:13 T--> I tx=4 rx=3 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 01
-19:05:13 T--> I tx=5 rx=3 | M_SP_NA_1 SPONTANEOUS CA=1 n=1 | 01 01 03 00 01 00 05 00 00 01
-19:05:13 T--> S rx=3
+22:34:22 <-- <I tx=1 rx=3 asdu=10B> | 2D 01 06 00 01 00 0A 00 00 81
+22:34:22 CMD 选择 IOA=10 -> 确认（等待执行）
+22:34:22 T--> I tx=3 rx=2 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 81
+22:34:22 <-- <I tx=2 rx=4 asdu=10B> | 2D 01 06 00 01 00 0A 00 00 01
+22:34:22 CMD 执行成功：通道 0 -> True（回读一致）
+22:34:22 T--> I tx=4 rx=3 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 01
+22:34:22 T--> I tx=5 rx=3 | M_SP_NA_1 SPONTANEOUS CA=1 n=1 | 01 01 03 00 01 00 05 00 00 01
   transmit(ACTIVATION) -> False
-19:05:23 <-- <I tx=3 rx=6 asdu=10B> | 2D 01 03 00 01 00 0A 00 00 81
-19:05:23 CMD 选择 IOA=10 -> 确认（等待执行）
-19:05:23 T--> I tx=6 rx=4 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 81
-19:05:23 T--> S rx=4
-19:05:23 <-- <I tx=4 rx=7 asdu=10B> | 2D 01 03 00 01 00 0A 00 00 01
-19:05:23 CMD 执行成功：通道 0 -> True（回读一致）
-19:05:23 T--> I tx=7 rx=5 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 01
-19:05:23 T--> I tx=8 rx=5 | M_SP_NA_1 SPONTANEOUS CA=1 n=1 | 01 01 03 00 01 00 05 00 00 01
-19:05:23 T--> S rx=5
+22:34:32 <-- <I tx=3 rx=6 asdu=10B> | 2D 01 03 00 01 00 0A 00 00 81
+22:34:32 CMD 选择 IOA=10 -> 确认（等待执行）
+22:34:32 T--> I tx=6 rx=4 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 81
+22:34:32 <-- <I tx=4 rx=7 asdu=10B> | 2D 01 03 00 01 00 0A 00 00 01
+22:34:32 CMD 执行成功：通道 0 -> True（回读一致）
+22:34:32 T--> I tx=7 rx=5 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 01
+22:34:32 T--> I tx=8 rx=5 | M_SP_NA_1 SPONTANEOUS CA=1 n=1 | 01 01 03 00 01 00 05 00 00 01
   transmit(SPONTANEOUS) -> False
-19:05:33 <-- <I tx=5 rx=9 asdu=10B> | 2D 01 05 00 01 00 0A 00 00 81
-19:05:33 CMD 选择 IOA=10 -> 确认（等待执行）
-19:05:33 T--> I tx=9 rx=6 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 81
-19:05:33 T--> S rx=6
-19:05:33 <-- <I tx=6 rx=10 asdu=10B> | 2D 01 05 00 01 00 0A 00 00 01
-19:05:33 CMD 执行成功：通道 0 -> True（回读一致）
-19:05:33 T--> I tx=10 rx=7 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 01
-19:05:33 T--> I tx=11 rx=7 | M_SP_NA_1 SPONTANEOUS CA=1 n=1 | 01 01 03 00 01 00 05 00 00 01
-19:05:33 T--> S rx=7
+22:34:42 <-- <I tx=5 rx=9 asdu=10B> | 2D 01 05 00 01 00 0A 00 00 81
+22:34:42 CMD 选择 IOA=10 -> 确认（等待执行）
+22:34:42 T--> I tx=9 rx=6 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 81
+22:34:42 <-- <I tx=6 rx=10 asdu=10B> | 2D 01 05 00 01 00 0A 00 00 01
+22:34:42 CMD 执行成功：通道 0 -> True（回读一致）
+22:34:42 T--> I tx=10 rx=7 | C_SC_NA_1 ACTIVATION_CONFIRM CA=1 n=1 | 2D 01 07 00 01 00 0A 00 00 01
+22:34:42 T--> I tx=11 rx=7 | M_SP_NA_1 SPONTANEOUS CA=1 n=1 | 01 01 03 00 01 00 05 00 00 01
   transmit(REQUEST) -> False
   多次尝试都没发出去
-19:05:43 <-- <S rx=12>
+22:34:52 <-- <S rx=12>
 
 [3] 执行器 = [True, False, False, False, False, False, False, False]  (期望通道0=True)
 [4] 子站点表 DI1(IOA5) = True
@@ -61,4 +54,4 @@
 主站收到变位: OK
 RESULT: PASS
 ==============================================================
-19:05:44 --- 连接关闭
+22:34:53 --- 连接关闭

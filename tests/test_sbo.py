@@ -33,11 +33,14 @@ def H(s: str) -> bytes:
 
 # ---------------------------------------------------------------- 手工拼的帧
 STARTDT_ACT = H("68 04 07 00 00 00")
+STOPDT_ACT = H("68 04 13 00 00 00")
 
 # 选择：C_SC_NA_1, COT=6, CA=1, IOA=10, SCO=0x81(选择+合)
 SEL_FRAME = H("68 0E 00 00 00 00  2D 01 06 00 01 00 0A 00 00 81")
 # 执行：同上去掉选择位，SCO=0x01(执行+合)；tx=1 rx=1
 EXE_FRAME = H("68 0E 02 00 02 00  2D 01 06 00 01 00 0A 00 00 01")
+# 同一条执行帧，但作为连接上的**第一帧**时 N(S) 必须是 0（子站会校验接收序号）
+EXE_FRAME_FIRST = H("68 0E 00 00 00 00  2D 01 06 00 01 00 0A 00 00 01")
 # 未知 IOA 的选择
 SEL_UNKNOWN = H("68 0E 00 00 00 00  2D 01 06 00 01 00 63 00 00 81")
 
@@ -162,15 +165,18 @@ def test_select_then_execute_success():
         assert exe_ack.objects[0].select is False, "确认应回显执行位"
 
         spont = got[1]
-        assert spont.type_id == int(TypeID.M_SP_NA_1), "应有遥信变位"
+        # 变位的 TypeID 跟点表声明走：本用例 IOA 5 声明为 M_SP_NA_1 → 突发帧仍是 1
+        assert spont.type_id == int(TypeID.M_SP_NA_1), \
+            "M_SP_NA_1 的变位应仍按 TypeID=1 上送"
         assert spont.cot == int(COT.SPONTANEOUS), "变位的 COT 应为 3(突发)"
         assert spont.objects[0].ioa == RB_IOA
         assert spont.objects[0].value is True
+        assert spont.objects[0].timestamp is None, "M_SP_NA_1 的帧不该带时标"
 
         # ③ 硬件侧状态
         assert h.act.snapshot()[OUT_IDX] is True, "执行器通道应被拉高"
         assert h.station.get(RB_IOA).value is True, "回读应写回遥信点"
-        assert h.station.get(RB_IOA).timestamp is not None, "变位应带时标"
+        assert h.station.get(RB_IOA).timestamp is not None, "点表里应记下变位时刻"
     finally:
         h.close()
 
@@ -179,7 +185,8 @@ def test_execute_without_select_is_rejected():
     """没先选择直接执行 → 否定确认，且不动作。"""
     h = Harness()
     try:
-        h.send(EXE_FRAME)
+        # 这一帧是连接上的第一帧，N(S) 必须是 0（子站校验接收序号）
+        h.send(EXE_FRAME_FIRST)
         got = asdus(recv_frames(h.sock))
         assert got, "应有回复"
         assert got[0].cot == int(COT.ACTIVATION_CONFIRM)
@@ -213,6 +220,26 @@ def test_unknown_ioa_is_rejected():
         got = asdus(recv_frames(h.sock))
         assert got, "应有回复"
         assert got[0].negative is True
+    finally:
+        h.close()
+
+
+def test_stopdt_clears_pending_select():
+    """STOPDT 后未执行的选择作废：重新 STARTDT 再执行 → 未先选择。"""
+    h = Harness()
+    try:
+        h.send(SEL_FRAME)                     # 选择（tx=0）
+        asdus(recv_frames(h.sock, idle=0.2))
+        h.send(STOPDT_ACT)                    # U 帧，不影响 N(S)
+        asdus(recv_frames(h.sock, idle=0.2))
+        h.send(STARTDT_ACT)
+        asdus(recv_frames(h.sock, idle=0.2))
+
+        h.send(EXE_FRAME)                     # 执行（tx=1）
+        got = asdus(recv_frames(h.sock))
+        assert got, "应有回复"
+        assert got[0].negative is True, "STOPDT 后选择状态应被清空"
+        assert h.act.snapshot()[OUT_IDX] is False, "被拒绝时不应动作"
     finally:
         h.close()
 

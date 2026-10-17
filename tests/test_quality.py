@@ -171,13 +171,33 @@ class Harness:
                                  source=self.source, poll_s=poll_s)
         self.slave.start()
         time.sleep(0.15)
+        self.tx = 0
+        self.rx = 0
         self.sock = socket.create_connection(("127.0.0.1", self.port), timeout=3)
         self.sock.sendall(STARTDT_ACT)
         recv_frames(self.sock, idle=0.2)
 
     def gi(self):
-        self.sock.sendall(GI_FRAME)
-        return asdus(recv_frames(self.sock, idle=0.5))
+        """发一次总召唤。
+
+        ⚠️ N(S) / N(R) 必须递增：子站会校验接收序号连续性，
+           **同一个 tx 重发**（比如每次总召唤都用 GI_FRAME 里的 tx=0）
+           会被当成重放/乱序直接断链。
+        """
+        tx = (self.tx % 32768) << 1
+        rx = (self.rx % 32768) << 1
+        frame = (GI_FRAME[:2]
+                 + bytes((tx & 0xFF, (tx >> 8) & 0xFF, rx & 0xFF, (rx >> 8) & 0xFF))
+                 + GI_FRAME[6:])
+        self.sock.sendall(frame)
+        self.tx = (self.tx + 1) % 32768
+
+        frames = recv_frames(self.sock, idle=0.5)
+        for f in frames:
+            a = decode_apdu(f)
+            if a is not None and a.is_i:
+                self.rx = (a.tx + 1) % 32768
+        return asdus(frames)
 
     def close(self):
         try:

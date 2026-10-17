@@ -1,0 +1,11 @@
+  PASS  test_clock_offset_unit
+  PASS  test_clock_sync_confirmed_and_echoed
+  PASS  test_clock_sync_updates_offset
+  PASS  test_config_accepts_tb_readback_point
+  PASS  test_invalid_clock_sync_is_negatively_confirmed
+  PASS  test_na_point_keeps_type1_on_all_paths
+  PASS  test_spontaneous_after_sync_is_type30_and_monotonic
+  PASS  test_spontaneous_telemetry_keeps_unstamped_type
+  PASS  test_tb_point_keeps_type30_on_all_paths
+------------------------------------------------------------
+9/9 passed
