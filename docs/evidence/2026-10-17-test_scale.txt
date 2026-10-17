@@ -1,0 +1,9 @@
+  PASS  test_127_exactly_stays_one_group
+      → 500 点：10 帧 / 500 对象 / 0.0 ms
+  PASS  test_500_points_interrogation_all_arrive
+  PASS  test_500_points_interrogation_is_fast
+  PASS  test_grouping_splits_at_127_objects
+      → 不确认 2s：只发出 3 帧（k=3）
+  PASS  test_window_k_blocks_sending_without_ack
+------------------------------------------------------------
+5/5 passed

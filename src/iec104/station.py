@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import quality as q_
+from .asdu import DATA_LEN
 from .consts import QDS, TypeID
 
 # 可被南向采集更新品质/值的类型。**命令类（C_SC_NA_1 等）不参与。**
@@ -18,6 +19,27 @@ READABLE_TYPES = frozenset({
     int(TypeID.M_ME_NA_1),
     int(TypeID.M_ME_NC_1),
 })
+
+# ---- 单帧容量上限（两个限制必须同时满足）
+# ① VSQ 只有 7 位 → 一个 ASDU 最多 127 个对象
+# ② 链路层长度字节只有 1 字节：L = 4(控制域) + len(ASDU) ≤ 253 → ASDU ≤ 249
+MAX_OBJECTS_VSQ = 127
+MAX_ASDU_LEN = 249
+_ASDU_HEADER_LEN = 6     # TypeID + VSQ + COT(2) + CA(2)
+_IOA_LEN = 3             # 第一个对象的信息对象地址
+
+
+def max_objects_per_frame(type_id: int) -> int:
+    """一种类型在一帧里最多能塞多少个对象。
+
+    ⚠️ 只按 127 切是不够的：127 个短浮点遥测 = 644 字节，远超链路层 249 字节上限。
+       必须按"数据段长度"再压一次。
+    """
+    data_len = DATA_LEN.get(type_id)
+    if not data_len:
+        return MAX_OBJECTS_VSQ
+    room = MAX_ASDU_LEN - _ASDU_HEADER_LEN - _IOA_LEN
+    return max(1, min(MAX_OBJECTS_VSQ, room // data_len))
 
 
 @dataclass
@@ -103,16 +125,22 @@ class Station:
 
     # ------------------------------------------------------------ 分组（供 SQ=1 打包）
     @staticmethod
-    def group_consecutive(points: Iterable[Point]) -> List[List[Point]]:
+    def group_consecutive(points: Iterable[Point],
+                          max_objects: int = 127) -> List[List[Point]]:
         """把 IOA 连续的同类点分成一组，用于 SQ=1 打包。
 
         例：[1,2,5,6] -> [[1,2],[5,6]]
+
         ⚠️ SQ=1 时帧里只写第一个 IOA，所以只有连续的点才能同组。
+        ⚠️ 一个 ASDU 最多 127 个对象（VSQ 只有 7 位），所以连续段必须在
+           `max_objects` 处切开——否则点表一大，总召唤直接抛
+           "too many objects"，整个上送崩掉。
         """
         ordered = sorted(points, key=lambda p: p.ioa)
         groups: List[List[Point]] = []
         for p in ordered:
-            if groups and p.ioa == groups[-1][-1].ioa + 1:
+            if (groups and p.ioa == groups[-1][-1].ioa + 1
+                    and len(groups[-1]) < max_objects):
                 groups[-1].append(p)
             else:
                 groups.append([p])
@@ -126,7 +154,8 @@ class Station:
                         int(TypeID.M_ME_NA_1), int(TypeID.M_ME_NC_1)):
             pts = self.by_type(type_id)
             if pts:
-                groups.extend(self.group_consecutive(pts))
+                groups.extend(self.group_consecutive(
+                    pts, max_objects=max_objects_per_frame(type_id)))
         return groups
 
     def cyclic_points(self) -> List[Point]:

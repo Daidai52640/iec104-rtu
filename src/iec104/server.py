@@ -25,7 +25,7 @@ from .asdu import Asdu, InformationObject, decode_asdu, encode_asdu
 from .clock import ClockOffset
 from .link import Apdu, decode_apdu, encode_i_frame, encode_s_frame, encode_u_frame, iter_apdus
 from .source import Source
-from .station import CommandBinding, Station
+from .station import CommandBinding, Station, max_objects_per_frame
 from .consts import BROADCAST_CA, COT, COT_PN_BIT, QDS, FrameFormat, TypeID, UFrame
 
 
@@ -612,7 +612,9 @@ class Session(threading.Thread):
         for p in self.station.cyclic_points():
             by_type.setdefault(p.type_id, []).append(p)
         for type_id in sorted(by_type):
-            for group in Station.group_consecutive(by_type[type_id]):
+            for group in Station.group_consecutive(
+                    by_type[type_id],
+                    max_objects=max_objects_per_frame(type_id)):
                 self.send_asdu(encode_asdu(
                     type_id, COT.PERIODIC, self.station.ca,
                     [self._info_object(p) for p in group],
