@@ -16,15 +16,16 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from iec104 import Iec104Slave, Station, TypeID  # noqa: E402
+from iec104 import Iec104Slave, MemoryActuator, Station, TypeID  # noqa: E402
 
 
 MEAS_BASE = {1: 23.7, 2: 62.4}   # 遥测：IOA -> 基准值
 SINGLE_BASE = {5: True, 6: False}  # 遥信：IOA -> 基准值
+CMD_IOA = 10                       # 遥控点：输出通道 0，回读映射到遥信 IOA 5
 
 
 def build_station(ca: int) -> Station:
-    """和演示服务端一致的点表：遥测 IOA 1/2、遥信 IOA 5/6。"""
+    """点表：遥测 IOA 1/2、遥信 IOA 5/6、遥控 IOA 10（绑定输出通道 0）。"""
     st = Station(common_address=ca, name="demo")
 
     for ioa, base in MEAS_BASE.items():
@@ -33,6 +34,10 @@ def build_station(ca: int) -> Station:
     for ioa, val in SINGLE_BASE.items():
         st.add(ioa, int(TypeID.M_SP_NA_1), val,
                name="DI1" if ioa == 5 else "DI2")
+
+    # ⭐ 遥控：命令点 → 执行器通道 0 → 回读到遥信 IOA 5
+    st.add(CMD_IOA, int(TypeID.C_SC_NA_1), False, name="DO1")
+    st.bind_command(CMD_IOA, output_index=0, readback_ioa=5)
 
     return st
 
@@ -60,11 +65,12 @@ def main() -> int:
     args = ap.parse_args()
 
     station = build_station(args.ca)
+    actuator = MemoryActuator(channels=8)
     if not args.no_sim:
         threading.Thread(target=simulate, args=(station,), daemon=True).start()
 
     slave = Iec104Slave(station, host=args.host, port=args.port,
-                        cyclic_s=args.cyclic, verbose=True)
+                        cyclic_s=args.cyclic, verbose=True, actuator=actuator)
     slave.start()
     try:
         while True:

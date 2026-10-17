@@ -41,6 +41,7 @@ class InformationObject:
     value: Any = None              # bool / float / int
     quality: int = 0               # QDS（遥测）或 SIQ 高位（遥信）
     select: bool = False           # 仅遥控：S/E 位（True=选择，False=执行）
+    timestamp: Optional[datetime] = None  # 仅带时标类型（M_SP_TB_1 等）
 
     def __repr__(self) -> str:
         extra = " SEL" if self.select else ""
@@ -76,6 +77,7 @@ class Asdu:
 # 长度（不含 IOA）
 DATA_LEN = {
     int(TypeID.M_SP_NA_1): 1,
+    int(TypeID.M_SP_TB_1): 8,     # 1 字节 SIQ + 7 字节 CP56Time2a（SOE）
     int(TypeID.M_ME_NC_1): 5,
     int(TypeID.C_SC_NA_1): 1,
     int(TypeID.C_IC_NA_1): 1,
@@ -87,6 +89,10 @@ def _encode_data(type_id: int, obj: InformationObject) -> bytes:
     if type_id == int(TypeID.M_SP_NA_1):
         siq = (0x01 if obj.value else 0x00) | (obj.quality & 0xF0)
         return bytes((siq,))
+
+    if type_id == int(TypeID.M_SP_TB_1):
+        siq = (0x01 if obj.value else 0x00) | (obj.quality & 0xF0)
+        return bytes((siq,)) + encode_cp56(obj.timestamp)
 
     if type_id == int(TypeID.M_ME_NC_1):
         # ⭐ 小端短浮点 + 1 字节 QDS —— 实测：23.7 -> 9A 99 BD 41 00
@@ -108,6 +114,12 @@ def _decode_data(type_id: int, chunk: bytes, obj: InformationObject) -> None:
     if type_id == int(TypeID.M_SP_NA_1):
         obj.value = bool(chunk[0] & 0x01)
         obj.quality = chunk[0] & 0xF0
+        return
+
+    if type_id == int(TypeID.M_SP_TB_1):
+        obj.value = bool(chunk[0] & 0x01)
+        obj.quality = chunk[0] & 0xF0
+        obj.timestamp = decode_cp56(chunk[1:8])
         return
 
     if type_id == int(TypeID.M_ME_NC_1):
@@ -134,11 +146,13 @@ def encode_asdu(
     objects: List[InformationObject],
     sq: bool = False,
     oa: int = 0,
+    negative: bool = False,
 ) -> bytes:
     """把一个 ASDU 编码成字节。
 
     sq=True 时按"顺序 IOA"打包（只写第一个对象的 IOA，其余隐含 +1）。
     ⚠️ 用 sq=True 时对象 IOA 必须连续递增，否则抛 ValueError。
+    negative=True 时置 COT 的 P/N 位（否定确认）——遥控被拒绝时用。
     """
     if type_id not in DATA_LEN:
         raise ValueError(f"unsupported TypeID {type_id}")
@@ -155,10 +169,11 @@ def encode_asdu(
                 raise ValueError("sq=True requires consecutive IOA")
 
     vsq = (0x80 if sq else 0) | (n & 0x7F)
+    cot_byte = (cot & 0x3F) | (0x40 if negative else 0x00)
     header = bytes((
         type_id & 0xFF,
         vsq,
-        cot & 0x3F,          # 骨架阶段不带 P/N 与 TEST 位
+        cot_byte,
         oa & 0xFF,           # OA（实测为 0）
         ca & 0xFF,
         (ca >> 8) & 0xFF,

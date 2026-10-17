@@ -1,10 +1,11 @@
-"""对象模型：点表 + 快照。
+"""对象模型：点表 + 快照 + 遥控绑定。
 
 一个 Station 对应一个公共地址（CA）。点按 IOA 索引。
-本文件不含任何协议字节级逻辑，只描述"我有哪些点、值是什么"。
+本文件不含任何协议字节级逻辑，只描述"我有哪些点、值是什么、遥控怎么落到通道上"。
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 
 from .consts import TypeID
@@ -20,6 +21,7 @@ class Point:
     quality: int = 0
     cyclic: bool = False          # True = 参与周期上送（COT=1）
     name: str = ""
+    timestamp: Optional[datetime] = None   # 带时标类型（SOE）用
 
     def __repr__(self) -> str:
         try:
@@ -27,6 +29,20 @@ class Point:
         except ValueError:
             t = str(self.type_id)
         return f"<Point {self.name or ''} IOA={self.ioa} {t}={self.value!r} q={self.quality:#x}>"
+
+
+@dataclass
+class CommandBinding:
+    """遥控点 → 执行器通道 → 回读遥信点 的绑定。
+
+    ⭐ 这是"协议层"与"硬件层"的接缝：
+        - 现在用内存执行器（无硬件）验证协议
+        - 板子到货只换 Actuator 实现，协议层与状态机一行不改
+    """
+
+    ioa: int                 # 遥控命令点 IOA（C_SC_NA_1）
+    output_index: int        # 执行器通道号（继电器 0~7）
+    readback_ioa: Optional[int] = None   # 执行后把回读值写回哪个遥信点
 
 
 class Station:
@@ -38,6 +54,7 @@ class Station:
         self.ca = common_address
         self.name = name
         self._points: Dict[int, Point] = {}
+        self._bindings: Dict[int, CommandBinding] = {}
 
     # ------------------------------------------------------------ 增删查
     def add(self, ioa: int, type_id: int, value: Any = None,
@@ -93,3 +110,19 @@ class Station:
     def cyclic_points(self) -> List[Point]:
         """参与周期上送的点。"""
         return [p for p in self.all() if p.cyclic]
+
+    # ------------------------------------------------------------ 遥控绑定
+    def bind_command(self, ioa: int, output_index: int,
+                     readback_ioa: Optional[int] = None) -> CommandBinding:
+        """把一个遥控点绑定到执行器通道（以及可选的回读遥信点）。"""
+        if ioa in self._bindings:
+            raise ValueError(f"command IOA {ioa} already bound")
+        b = CommandBinding(ioa=ioa, output_index=output_index, readback_ioa=readback_ioa)
+        self._bindings[ioa] = b
+        return b
+
+    def binding(self, ioa: int) -> Optional[CommandBinding]:
+        return self._bindings.get(ioa)
+
+    def all_bindings(self) -> List[CommandBinding]:
+        return [self._bindings[k] for k in sorted(self._bindings)]
