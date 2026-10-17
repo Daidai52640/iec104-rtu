@@ -32,6 +32,7 @@ class Point:
     name: str = ""
     timestamp: Optional[datetime] = None   # 带时标类型（SOE）用
     updated_at: Optional[datetime] = None  # 最近一次成功采到的时刻
+    source_channel: Optional[int] = None   # 数据源通道号（DI 从哪一路读）；None = 不参与采集
 
     def __repr__(self) -> str:
         try:
@@ -57,7 +58,7 @@ class CommandBinding:
 
 
 class Station:
-    """一个子站（公共地址）。点表是"代码里的配置"，暂不支持热加载。"""
+    """一个子站（公共地址）。点表启动时从 JSON 配置载入（见 `config.py`），暂不支持热加载。"""
 
     def __init__(self, common_address: int, name: str = "") -> None:
         if not (0 <= common_address <= 0xFFFF):
@@ -69,12 +70,14 @@ class Station:
 
     # ------------------------------------------------------------ 增删查
     def add(self, ioa: int, type_id: int, value: Any = None,
-            quality: int = 0, cyclic: bool = False, name: str = "") -> Point:
+            quality: int = 0, cyclic: bool = False, name: str = "",
+            source_channel: Optional[int] = None) -> Point:
         """加一个点。同一 IOA 重复添加会报错（避免静默覆盖）。"""
         if ioa in self._points:
             raise ValueError(f"IOA {ioa} already exists")
         p = Point(ioa=ioa, type_id=type_id, value=value,
-                  quality=quality, cyclic=cyclic, name=name)
+                  quality=quality, cyclic=cyclic, name=name,
+                  source_channel=source_channel)
         self._points[ioa] = p
         return p
 

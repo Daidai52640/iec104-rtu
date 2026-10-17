@@ -1,13 +1,18 @@
 """启动 104 子站。
 
 用法：
-    # 在项目根目录下
-    set PYTHONPATH=src
+    # 在项目根目录下（pwsh）
+    $env:PYTHONPATH="src"
     python scripts\\run_slave.py --port 24040 --poll 2 --cyclic 2
+
+点表从 JSON 文件读（默认 `config/points.json`），换一套点表只改配置、不改代码：
+    python scripts\\run_slave.py --points config\\points.json
 
 然后用 QTester104 连 127.0.0.1:24040，点 [GI]。
 
 参数：
+    --points  点表 JSON 路径（默认：<项目根>/config/points.json）
+    --ca      公共地址；给了就覆盖配置文件里的 common_address
     --poll    采集周期（秒），0=不采集
     --cyclic  周期上送间隔（秒），0=关闭
     --no-sim  不模拟数值变化（静态值）
@@ -20,40 +25,24 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from iec104 import (  # noqa: E402
-    Iec104Slave, MemoryActuator, Station, StubSource, TypeID,
+from iec104 import Iec104Slave, MemoryActuator, StubSource  # noqa: E402
+from iec104.config import (  # noqa: E402
+    ACTUATOR_CHANNELS, ConfigError, load_station, readback_map,
 )
 
-
-MEAS_BASE = {1: 23.7, 2: 62.4}     # 遥测：IOA -> 基准值
-SINGLE_BASE = {5: False, 6: True}  # 遥信：IOA -> 基准值（会由执行器回读覆盖）
-CMD_IOA = 10                       # 遥控点：输出通道 0，回读映射到遥信 IOA 5
-READBACK_MAP = {0: 5, 1: 6}        # 执行器通道 -> 回读到的遥信点 IOA
-
-
-def build_station(ca: int) -> Station:
-    """点表：遥测 IOA 1/2、遥信 IOA 5/6、遥控 IOA 10（绑定输出通道 0）。"""
-    st = Station(common_address=ca, name="demo")
-
-    for ioa, base in MEAS_BASE.items():
-        st.add(ioa, int(TypeID.M_ME_NC_1), base, cyclic=True,
-               name="Temp" if ioa == 1 else "Humidity")
-    for ioa, val in SINGLE_BASE.items():
-        st.add(ioa, int(TypeID.M_SP_NA_1), val,
-               name="DI1" if ioa == 5 else "DI2")
-
-    # ⭐ 遥控：命令点 → 执行器通道 0 → 回读到遥信 IOA 5
-    st.add(CMD_IOA, int(TypeID.C_SC_NA_1), False, name="DO1")
-    st.bind_command(CMD_IOA, output_index=0, readback_ioa=READBACK_MAP[0])
-
-    return st
+# 默认点表按"项目根"解析，这样从任何目录启动都能找到同一份配置。
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_POINTS = os.path.join(ROOT, "config", "points.json")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="IEC 60870-5-104 子站")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=24040)
-    ap.add_argument("--ca", type=int, default=1, help="公共地址")
+    ap.add_argument("--points", default=DEFAULT_POINTS,
+                    help="点表 JSON 路径（默认：<项目根>/config/points.json）")
+    ap.add_argument("--ca", type=int, default=None,
+                    help="公共地址；不给就用配置文件里的 common_address")
     ap.add_argument("--poll", type=float, default=2.0,
                     help="采集周期（秒），0=不采集")
     ap.add_argument("--cyclic", type=float, default=0.0,
@@ -62,9 +51,26 @@ def main() -> int:
                     help="不模拟数值变化（静态值）")
     args = ap.parse_args()
 
-    station = build_station(args.ca)
-    actuator = MemoryActuator(channels=8)
-    source = StubSource(actuator=actuator, readback_map=READBACK_MAP)
+    # ⚠️ 点表非法就别启动：带着半张错点表跑，比不跑更难查。
+    try:
+        station = load_station(args.points)
+        # 通道映射也在这里算：source_channel / 命令回读冲突会在这一步报错。
+        rb_map = readback_map(station)
+    except ConfigError as e:
+        print(f"启动失败：{e}", file=sys.stderr)
+        return 2
+
+    if args.ca is not None:
+        if not (0 <= args.ca <= 0xFFFF):
+            print(f"启动失败：--ca {args.ca} 越界（允许 0~65535）", file=sys.stderr)
+            return 2
+        station.ca = args.ca
+
+    print(f"点表：{args.points}（CA={station.ca}，{len(station)} 个点）")
+
+    actuator = MemoryActuator(channels=ACTUATOR_CHANNELS)
+    # 回读接线也从点表推导，脚本里不再出现具体 IOA
+    source = StubSource(actuator=actuator, readback_map=rb_map)
     if args.no_sim:
         source.fail = False
         # 静态值：仍然采集，但值不变（StubSource 内部相位靠轮次推进，
