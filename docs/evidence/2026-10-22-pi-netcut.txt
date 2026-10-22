@@ -1,0 +1,103 @@
+# 断网 / 断电 测试（2026-10-22）
+
+> 子站部署在树莓派上（`/home/ddf/iec104-rtu`，systemd 托管，共存模式）。
+> 主站在另一台机器（Windows 上的 c104）。
+
+---
+
+## 一、断网测试：PASS
+
+### 怎么做的
+
+用 `iptables` 丢弃发往 2404 的入站包，模拟"网线被拔"：
+
+```bash
+sudo iptables -I INPUT -p tcp --dport 2404 -j DROP
+sleep 25
+sudo iptables -D INPUT -p tcp --dport 2404 -j DROP
+```
+
+⭐ **为什么用 `DROP` 而不是拔网线**：
+`DROP` 让连接**无 FIN 地挂死**，和真实断网一致；拔网线还会顺带断掉 SSH，再连不上机器。
+只影响 2404，不碰 P1 的 5020 和 SSH 的 22。
+
+### 结果
+
+| 轮次 | 断网前 | 恢复后 |
+|---|---|---|
+| 1 | OK，温度 26.3 | OK，温度 26.3 |
+| 2 | OK，温度 26.3 | OK，温度 26.3 |
+
+### ⭐ 关键判据：线程数不增长
+
+```
+测试前线程数 = 3
+两轮反复连断之后 = 3
+```
+
+如果僵死会话不被回收，每断一次就泄漏一个线程 —— 这是 104 子站最常见的慢性病。
+
+### 会话生命周期（journal 实测）
+
+```
+22:29:46 T--> I tx=0 rx=1 | C_IC_NA_1 ACTIVATION_CONFIRM CA=1 n=1
+22:29:46 T--> I tx=1 rx=1 | M_SP_NA_1 INTERROGATED_BY_STATION CA=1 n=2
+22:29:46 T--> I tx=2 rx=1 | M_ME_NC_1 INTERROGATED_BY_STATION CA=1 n=2
+22:29:46 T--> I tx=3 rx=1 | C_IC_NA_1 ACTIVATION_TERMINATION CA=1 n=1
+22:29:47 <-- <S rx=4>
+22:29:47 --- 连接关闭
+```
+
+会话开 → 总召唤四帧 → `<S>` → **`--- 连接关闭`**（清理跑了）。
+
+---
+
+## 二、断电测试：用 `reboot`，不要硬拔
+
+### ⚠️ 为什么不硬拔
+
+硬拔电源时 SD 卡可能有写入在进行，**有文件系统损坏风险**。
+P1 自己的文档里也标了"硬断电（拔电源）未测"，就是这个原因。
+
+`sudo reboot` 能验证的正是我们要的那件事：**boot 时 systemd 按依赖顺序把服务拉起来**，
+而且没有掉数据风险。
+
+### 什么时候做
+
+⚠️ 会**连带重启 P1**（P1 也是 `enabled`，会自己起来）。
+所以**建议和"独占窗口"合并成一次**，不要为它单独折腾。
+
+```bash
+sudo reboot
+# 等 60 秒
+systemctl is-active cems-device cems-gateway-plant1 cems-gateway-plant2 iec104-slave
+# 期望 active ×4
+```
+
+---
+
+## 三、还没测的
+
+| 项 | 为什么没测 |
+|---|---|
+| 整机硬断电（拔电源） | SD 卡风险，用 `reboot` 替代 |
+| 485 断线 | 串口被 P1 占着，要等独占窗口 |
+| 长时间运行（>24h） | 本轮不做 |
+
+---
+
+## 四、复现步骤汇总
+
+```bash
+# 断网
+sudo iptables -I INPUT -p tcp --dport 2404 -j DROP
+sleep 25
+sudo iptables -D INPUT -p tcp --dport 2404 -j DROP
+
+# 看线程数（泄漏判据）
+PID=$(systemctl show -p MainPID --value iec104-slave.service)
+ls /proc/$PID/task | wc -l
+
+# 看会话生命周期
+journalctl -u iec104-slave -n 20 --no-pager -o cat
+```

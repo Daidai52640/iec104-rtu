@@ -394,9 +394,9 @@ def readback_map(station: Station) -> Dict[int, int]:
 _SOURCE_KEYS = frozenset({"type", "host", "port", "baud", "unit", "default_unit",
                           "timeout", "map"})
 _SOURCE_MAP_KEYS = frozenset({"ioa", "unit", "kind", "register", "address",
-                              "scale", "signed"})
+                              "scale", "signed", "bit"})
 _SOURCE_TYPES = frozenset({"modbus_tcp", "modbus_rtu"})
-_RTU_KINDS = frozenset({"hr", "ir", "coil"})
+_RTU_KINDS = frozenset({"hr", "ir", "coil", "bit"})
 
 
 def source_spec_from_dict(raw: Any, station: Optional[Station] = None,
@@ -536,7 +536,16 @@ def source_spec_from_dict(raw: Any, station: Optional[Station] = None,
         if not isinstance(signed, bool):
             raise _err(origin, f"{label}.signed 必须是 true/false")
 
-        mapping.append((ioa, unit, kind, addr, float(scale), signed))
+        bit = m.get("bit")
+        if kind == "bit":
+            if bit is None:
+                raise _err(origin, f'{label}.kind="bit" 必须同时给 bit（0~15）')
+            if isinstance(bit, bool) or not isinstance(bit, int) or not (0 <= bit <= 15):
+                raise _err(origin, f"{label}.bit={bit!r} 超出 0~15")
+        elif bit is not None:
+            raise _err(origin, f'{label}.kind={kind!r} 不接受 bit 字段')
+
+        mapping.append((ioa, unit, kind, addr, float(scale), signed, bit))
 
     out.update(port=port, baud=baud, default_unit=default_unit, mapping=mapping)
     return out

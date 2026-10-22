@@ -10,8 +10,12 @@
     "map": [
       {"ioa": 1, "kind": "hr", "address": 6, "scale": 10, "signed": true},
       {"ioa": 2, "kind": "hr", "address": 7, "scale": 10},
+
       {"ioa": 5, "unit": 2, "kind": "coil", "address": 1280},
-      {"ioa": 6, "unit": 2, "kind": "coil", "address": 1281}
+      {"ioa": 6, "unit": 2, "kind": "coil", "address": 1281},
+
+      {"ioa": 7, "unit": 2, "kind": "bit", "address": 1024, "bit": 0},
+      {"ioa": 8, "unit": 2, "kind": "bit", "address": 1024, "bit": 1}
     ]
   },
   "actuator": {
@@ -21,10 +25,12 @@
     "channels": 4
   },
   "points": [
-    {"ioa": 1,  "type": "M_ME_NC_1", "name": "Temp",     "value": 0.0,   "cyclic": true},
-    {"ioa": 2,  "type": "M_ME_NC_1", "name": "Humidity", "value": 0.0,   "cyclic": true},
-    {"ioa": 5,  "type": "M_SP_NA_1", "name": "DO1_status", "value": false},
-    {"ioa": 6,  "type": "M_SP_NA_1", "name": "DO2_status", "value": false},
-    {"ioa": 10, "type": "C_SC_NA_1", "name": "DO1",      "value": false, "actuator": 0, "readback_ioa": 5}
+    {"ioa": 1,  "type": "M_ME_NC_1", "name": "Temp",        "value": 0.0,   "cyclic": true},
+    {"ioa": 2,  "type": "M_ME_NC_1", "name": "Humidity",    "value": 0.0,   "cyclic": true},
+    {"ioa": 5,  "type": "M_SP_NA_1", "name": "DO1_image",   "value": false},
+    {"ioa": 6,  "type": "M_SP_NA_1", "name": "DO2_image",   "value": false},
+    {"ioa": 7,  "type": "M_SP_NA_1", "name": "DO1_contact", "value": false},
+    {"ioa": 8,  "type": "M_SP_NA_1", "name": "DO2_contact", "value": false},
+    {"ioa": 10, "type": "C_SC_NA_1", "name": "DO1",         "value": false, "actuator": 0, "readback_ioa": 5}
   ]
 }

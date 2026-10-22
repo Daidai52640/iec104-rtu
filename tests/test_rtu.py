@@ -22,10 +22,12 @@ from iec104.rtu import (  # noqa: E402
 
 # ---------------------------------------------------------------- 假串口
 class FakeUnit:
-    """一个假从站：寄存器 + 线圈。"""
+    """一个假从站：保持寄存器 + 输入寄存器 + 线圈。"""
 
-    def __init__(self, registers=None, coils=None, exception=None):
+    def __init__(self, registers=None, coils=None, exception=None,
+                 input_registers=None):
         self.registers = dict(registers or {})
+        self.input_registers = dict(input_registers or {})
         self.coils = dict(coils or {})          # 地址 -> bool
         self.exception = exception              # 非 None 时一律回该异常码
 
@@ -74,14 +76,15 @@ class FakeSerial:
 
         if u.exception is not None:
             resp = bytes((unit, fc | 0x80, u.exception))
-        elif fc == 3:
+        elif fc in (3, 4):
             addr = (data[2] << 8) | data[3]
             count = (data[4] << 8) | data[5]
+            src = u.registers if fc == 3 else u.input_registers
             payload = bytearray()
             for i in range(count):
-                v = u.registers.get(addr + i, 0) & 0xFFFF
+                v = src.get(addr + i, 0) & 0xFFFF
                 payload += bytes((v >> 8 & 0xFF, v & 0xFF))
-            resp = bytes((unit, 3, count * 2)) + bytes(payload)
+            resp = bytes((unit, fc, count * 2)) + bytes(payload)
         elif fc == 1:
             addr = (data[2] << 8) | data[3]
             count = (data[4] << 8) | data[5]
@@ -253,6 +256,66 @@ def test_actuator_readback_none_when_unreachable():
     act = ModbusRtuActuator(link, unit=2, coil_base=1280, channels=4)
     assert act.apply(0, True) is False, "写失败应返回 False"
     assert act.readback(0) is None, "读不到应返回 None"
+    link.close()
+
+
+# ================================================================ 位提取
+def test_bit_kind_extracts_from_input_register():
+    """⭐ DI 聚在输入寄存器的字里：按位取出来当遥信。
+
+    继电器板实测：X 输入在 0x0400，用 FC04 读，一个寄存器装多个开关量。
+    """
+    # 0x0400 = 1024；bit0=1, bit1=0, bit2=1 → 0b101 = 5
+    fake = FakeSerial({2: FakeUnit(input_registers={1024: 0b101})})
+    link = make_link(fake)
+    src = ModbusRtuSource(link, [
+        (7, 2, "bit", 1024, 1.0, False, 0),
+        (8, 2, "bit", 1024, 1.0, False, 1),
+        (9, 2, "bit", 1024, 1.0, False, 2),
+    ])
+    out = src.poll()
+    assert out[7][0] is True, out
+    assert out[8][0] is False, out
+    assert out[9][0] is True, out
+    link.close()
+
+
+def test_multiple_bits_share_one_request():
+    """同一个寄存器的多位只读一次，不是每位发一帧。"""
+    fake = FakeSerial({2: FakeUnit(input_registers={1024: 0xFF})})
+    link = make_link(fake)
+    src = ModbusRtuSource(link, [
+        (7, 2, "bit", 1024, 1.0, False, 0),
+        (8, 2, "bit", 1024, 1.0, False, 1),
+        (9, 2, "bit", 1024, 1.0, False, 2),
+    ])
+    src.poll()
+    assert fake.requests and all(r[1] == 4 for r in fake.requests), "应全部走 FC04"
+    assert len(fake.requests) == 1, f"应只发 1 帧，实际 {len(fake.requests)} 帧"
+    link.close()
+
+
+def test_bit_kind_requires_bit_field():
+    fake = FakeSerial({2: FakeUnit()})
+    link = make_link(fake)
+    try:
+        ModbusRtuSource(link, [(7, 2, "bit", 1024, 1.0, False)])
+    except ValueError as e:
+        assert "bit" in str(e), e
+    else:
+        raise AssertionError("kind=bit 缺少 bit 应报错")
+    link.close()
+
+
+def test_bit_field_rejected_on_other_kinds():
+    fake = FakeSerial({2: FakeUnit()})
+    link = make_link(fake)
+    try:
+        ModbusRtuSource(link, [(7, 2, "coil", 1024, 1.0, False, 0)])
+    except ValueError as e:
+        assert "不接受" in str(e), e
+    else:
+        raise AssertionError("kind=coil 给 bit 应报错")
     link.close()
 
 

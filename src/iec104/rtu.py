@@ -204,16 +204,23 @@ class RtuLink:
 class ModbusRtuSource(Source):
     """一条 RTU 总线上**多个从站**的数据源。
 
-    映射每项：`(ioa, unit, kind, address, scale, signed)`
-    - `kind`：`"hr"` 保持寄存器(FC03) / `"ir"` 输入寄存器(FC04) / `"coil"` 线圈(FC01)
-    - 线圈返回 `bool`，`scale` 忽略
+    映射每项：`(ioa, unit, kind, address, scale, signed[, bit])`
+
+    - `kind="hr"`   保持寄存器 FC03 → 数值
+    - `kind="ir"`   输入寄存器 FC04 → 数值
+    - `kind="coil"` 线圈 FC01 → bool
+    - `kind="bit"`  **输入寄存器的某一位** → bool（`bit` 必填，0~15）
+
+    ⭐ `"bit"` 是为现场那种"DI 聚在一个寄存器里"的板子准备的：
+       输入区是 16 位字，一个寄存器里塞多个开关量（本项目的 X 输入就是这样，
+       实测在 `0x0400`，用 FC04 读）。
 
     ⭐ **按从站隔离故障**：某个从站读失败，只让它的点缺席（上层标 IV），
        不影响同一总线上其它从站 —— 真的现场就是这样：
        继电器板坏了不该让温度也跟着变无效。
     """
 
-    KINDS = ("hr", "ir", "coil")
+    KINDS = ("hr", "ir", "coil", "bit")
     CHUNK = 120
 
     def __init__(self, link: RtuLink, mapping, default_unit: int = 1) -> None:
@@ -221,27 +228,43 @@ class ModbusRtuSource(Source):
         self.default_unit = int(default_unit)
         self._map = []
         for item in mapping:
-            ioa, unit, kind, address, scale, signed = item
+            if len(item) == 6:
+                ioa, unit, kind, address, scale, signed = item
+                bit = None
+            elif len(item) == 7:
+                ioa, unit, kind, address, scale, signed, bit = item
+            else:
+                raise ValueError(f"映射项长度必须是 6 或 7：{item!r}")
+
             if kind not in self.KINDS:
                 raise ValueError(f"IOA {ioa} 的 kind={kind!r} 不支持（{self.KINDS}）")
             if address < 0:
                 raise ValueError(f"IOA {ioa} 的地址不能为负")
             if scale <= 0:
                 raise ValueError(f"IOA {ioa} 的 scale 必须 > 0")
+            if kind == "bit":
+                if bit is None:
+                    raise ValueError(f"IOA {ioa} 的 kind=bit 必须给 bit（0~15）")
+                if isinstance(bit, bool) or not isinstance(bit, int) or not (0 <= bit <= 15):
+                    raise ValueError(f"IOA {ioa} 的 bit={bit!r} 超出 0~15")
+            elif bit is not None:
+                raise ValueError(f"IOA {ioa} 的 kind={kind} 不接受 bit 字段")
+
             self._map.append((int(ioa), int(unit or self.default_unit),
-                              kind, int(address), float(scale), bool(signed)))
+                              kind, int(address), float(scale), bool(signed), bit))
         self.last_error: str = ""
 
     def _read_group(self, unit: int, kind: str, items):
-        start = min(a for _, _, _, a, _, _ in items)
-        end = max(a for _, _, _, a, _, _ in items)
+        start = min(a for _, _, _, a, _, _, _ in items)
+        end = max(a for _, _, _, a, _, _, _ in items)
         raw = {}
         addr = start
         while addr <= end:
             count = min(self.CHUNK, end - addr + 1)
             if kind == "hr":
                 vals = self.link.read_registers(unit, addr, count)
-            elif kind == "ir":
+            elif kind in ("ir", "bit"):
+                # ⭐ "bit" 也从输入寄存器读：DI 通常聚在输入区的字里
                 vals = self.link.read_input_registers(unit, addr, count)
             else:
                 vals = self.link.read_coils(unit, addr, count)
@@ -254,7 +277,7 @@ class ModbusRtuSource(Source):
         # 按 (从站, 区) 分组，每个组合一次连续读
         groups = {}
         for entry in self._map:
-            ioa, unit, kind, address, scale, signed = entry
+            _ioa, unit, kind = entry[0], entry[1], entry[2]
             groups.setdefault((unit, kind), []).append(entry)
 
         out = {}
@@ -265,12 +288,14 @@ class ModbusRtuSource(Source):
             except Exception as e:                  # ⚠️ 只影响这个从站
                 errors.append(f"从站{unit}/{kind}: {type(e).__name__}: {e}")
                 continue
-            for ioa, _u, _k, address, scale, signed in items:
+            for ioa, _u, _k, address, scale, signed, bit in items:
                 if address not in raw:
                     continue
                 v = raw[address]
                 if kind == "coil":
                     out[ioa] = (bool(v), 0)
+                elif kind == "bit":
+                    out[ioa] = (bool(v >> bit & 1), 0)
                 else:
                     if signed and v >= 0x8000:
                         v -= 0x10000
