@@ -1,0 +1,6 @@
+# 跨机 104 验证  2026-10-22 21:44:42
+主站：Windows 上的 c104    子站：树莓派 192.168.31.236:2404 CA=1
+连接状态：True  ConnectionState.OPEN
+IOA1 温度 = 26.1  品质 good=<bound method PyCapsule.is_good of Quality set: {}, is_good: True>
+IOA2 湿度 = 59.9  品质 good=<bound method PyCapsule.is_good of Quality set: {}, is_good: True>
+RESULT: PASS
