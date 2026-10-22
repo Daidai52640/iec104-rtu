@@ -92,7 +92,7 @@ _BOOL_VALUE_TYPES = frozenset({
 # 回读点只允许单点遥信（带不带时标都行）：上送 TypeID 由该点声明的类型决定。
 _READBACK_TYPES = frozenset({int(TypeID.M_SP_NA_1), int(TypeID.M_SP_TB_1)})
 
-_TOP_KEYS = frozenset({"common_address", "name", "points", "source"})
+_TOP_KEYS = frozenset({"common_address", "name", "points", "source", "actuator"})
 _POINT_KEYS = frozenset({
     "ioa", "type", "name", "value", "cyclic", "source_channel",
     "actuator", "readback_ioa", "mutex_group", "min_interval",
@@ -391,9 +391,12 @@ def readback_map(station: Station) -> Dict[int, int]:
 
 # ---------------------------------------------------------------- 数据源配置
 #: `source` 段允许的字段
-_SOURCE_KEYS = frozenset({"type", "host", "port", "unit", "timeout", "map"})
-_SOURCE_MAP_KEYS = frozenset({"ioa", "register", "scale", "signed"})
-_SOURCE_TYPES = frozenset({"modbus_tcp"})
+_SOURCE_KEYS = frozenset({"type", "host", "port", "baud", "unit", "default_unit",
+                          "timeout", "map"})
+_SOURCE_MAP_KEYS = frozenset({"ioa", "unit", "kind", "register", "address",
+                              "scale", "signed"})
+_SOURCE_TYPES = frozenset({"modbus_tcp", "modbus_rtu"})
+_RTU_KINDS = frozenset({"hr", "ir", "coil"})
 
 
 def source_spec_from_dict(raw: Any, station: Optional[Station] = None,
@@ -403,7 +406,11 @@ def source_spec_from_dict(raw: Any, station: Optional[Station] = None,
     ⭐ 为什么数据源也进点表：现场设备地址、寄存器、系数都是"点表级"的事实，
        和 IOA 一样属于运维改的东西，不该写死在启动脚本里。
 
-    返回可直接喂给 `ModbusTcpSource` 的参数（`mapping` 是元组列表）。
+    两种形态：
+        `modbus_tcp` —— 从某个 Modbus TCP 从站读（同一台机器上已有采集进程时用）
+        `modbus_rtu` —— 自己开串口扫 485 总线（独占窗口用，可接多个从站）
+
+    返回可直接喂给数据源构造器的参数。
     """
     if not isinstance(raw, dict):
         raise _err(origin, f'"source" 必须是 JSON 对象，实际是 {type(raw).__name__}')
@@ -417,23 +424,6 @@ def source_spec_from_dict(raw: Any, station: Optional[Station] = None,
         raise _err(origin, f'"source.type" 不支持 {stype!r}'
                           f'（当前支持：{_allowed(_SOURCE_TYPES)}）')
 
-    host = raw.get("host", "127.0.0.1")
-    if not isinstance(host, str) or not host:
-        raise _err(origin, '"source.host" 必须是非空字符串')
-
-    def _int_field(name: str, lo: int, hi: int, default: Optional[int] = None) -> int:
-        v = raw.get(name, default)
-        if v is None:
-            raise _err(origin, f'"source" 缺少字段 "{name}"')
-        if isinstance(v, bool) or not isinstance(v, int):
-            raise _err(origin, f'"source.{name}" 必须是整数，实际是 {type(v).__name__}')
-        if not (lo <= v <= hi):
-            raise _err(origin, f'"source.{name}" 超出范围 [{lo}, {hi}]：{v}')
-        return v
-
-    port = _int_field("port", 1, 65535, 502)
-    unit = _int_field("unit", 1, 247, 1)
-
     timeout = raw.get("timeout", 2.0)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         raise _err(origin, f'"source.timeout" 必须是数字，实际是 {type(timeout).__name__}')
@@ -444,7 +434,69 @@ def source_spec_from_dict(raw: Any, station: Optional[Station] = None,
     if not isinstance(maps, list) or not maps:
         raise _err(origin, '"source.map" 必须是非空数组')
 
-    mapping: list = []
+    out: Dict[str, Any] = {"type": stype, "timeout": float(timeout)}
+
+    if stype == "modbus_tcp":
+        host = raw.get("host", "127.0.0.1")
+        if not isinstance(host, str) or not host:
+            raise _err(origin, '"source.host" 必须是非空字符串')
+
+        def _int_field(name: str, lo: int, hi: int, default: Optional[int] = None) -> int:
+            v = raw.get(name, default)
+            if v is None:
+                raise _err(origin, f'"source" 缺少字段 "{name}"')
+            if isinstance(v, bool) or not isinstance(v, int):
+                raise _err(origin, f'"source.{name}" 必须是整数，实际是 {type(v).__name__}')
+            if not (lo <= v <= hi):
+                raise _err(origin, f'"source.{name}" 超出范围 [{lo}, {hi}]：{v}')
+            return v
+
+        out.update(host=host, port=_int_field("port", 1, 65535, 502),
+                   unit=_int_field("unit", 1, 247, 1))
+        mapping = []
+        seen_ioa = set()
+        for i, m in enumerate(maps):
+            label = f"source.map[{i}]"
+            if not isinstance(m, dict):
+                raise _err(origin, f"{label} 必须是 JSON 对象")
+            unk = sorted(set(m) - {"ioa", "register", "address", "scale", "signed"})
+            if unk:
+                raise _err(origin, f"{label} 含未知字段 {unk}")
+            ioa = m.get("ioa")
+            if isinstance(ioa, bool) or not isinstance(ioa, int):
+                raise _err(origin, f"{label}.ioa 必须是整数")
+            if station is not None and station.get(ioa) is None:
+                raise _err(origin, f"{label}.ioa={ioa} 在点表里不存在")
+            if ioa in seen_ioa:
+                raise _err(origin, f"{label}.ioa={ioa} 重复")
+            seen_ioa.add(ioa)
+            reg = m.get("register", m.get("address"))
+            if isinstance(reg, bool) or not isinstance(reg, int) or reg < 0:
+                raise _err(origin, f"{label}.register 必须是 >= 0 的整数")
+            scale = m.get("scale", 1)
+            if isinstance(scale, bool) or not isinstance(scale, (int, float)) or scale <= 0:
+                raise _err(origin, f"{label}.scale 必须是 > 0 的数字")
+            signed = m.get("signed", False)
+            if not isinstance(signed, bool):
+                raise _err(origin, f"{label}.signed 必须是 true/false")
+            mapping.append((ioa, reg, float(scale), signed))
+        out["mapping"] = mapping
+        return out
+
+    # ---------------- modbus_rtu
+    port = raw.get("port")
+    if not isinstance(port, str) or not port:
+        raise _err(origin, '"source.port" 在 RTU 模式下必须是非空字符串'
+                          '（Linux 形如 /dev/ttyUSB0，Windows 形如 COM3）')
+    baud = raw.get("baud", 4800)
+    if isinstance(baud, bool) or not isinstance(baud, int) or baud <= 0:
+        raise _err(origin, f'"source.baud" 必须是正整数，实际是 {baud!r}')
+    default_unit = raw.get("default_unit", raw.get("unit", 1))
+    if isinstance(default_unit, bool) or not isinstance(default_unit, int) \
+            or not (1 <= default_unit <= 247):
+        raise _err(origin, f'"source.default_unit" 必须在 [1, 247]：{default_unit!r}')
+
+    mapping = []
     seen_ioa = set()
     for i, m in enumerate(maps):
         label = f"source.map[{i}]"
@@ -454,7 +506,6 @@ def source_spec_from_dict(raw: Any, station: Optional[Station] = None,
         if unk:
             raise _err(origin, f"{label} 含未知字段 {unk}"
                               f"（允许：{_allowed(_SOURCE_MAP_KEYS)}）")
-
         ioa = m.get("ioa")
         if isinstance(ioa, bool) or not isinstance(ioa, int):
             raise _err(origin, f"{label}.ioa 必须是整数")
@@ -464,9 +515,18 @@ def source_spec_from_dict(raw: Any, station: Optional[Station] = None,
             raise _err(origin, f"{label}.ioa={ioa} 重复")
         seen_ioa.add(ioa)
 
-        reg = m.get("register")
-        if isinstance(reg, bool) or not isinstance(reg, int) or reg < 0:
-            raise _err(origin, f"{label}.register 必须是 >= 0 的整数")
+        unit = m.get("unit", default_unit)
+        if isinstance(unit, bool) or not isinstance(unit, int) or not (1 <= unit <= 247):
+            raise _err(origin, f"{label}.unit 必须在 [1, 247]：{unit!r}")
+
+        kind = m.get("kind", "hr")
+        if kind not in _RTU_KINDS:
+            raise _err(origin, f"{label}.kind 不支持 {kind!r}"
+                              f"（允许：{_allowed(_RTU_KINDS)}）")
+
+        addr = m.get("address", m.get("register"))
+        if isinstance(addr, bool) or not isinstance(addr, int) or addr < 0:
+            raise _err(origin, f"{label}.address 必须是 >= 0 的整数")
 
         scale = m.get("scale", 1)
         if isinstance(scale, bool) or not isinstance(scale, (int, float)) or scale <= 0:
@@ -476,10 +536,10 @@ def source_spec_from_dict(raw: Any, station: Optional[Station] = None,
         if not isinstance(signed, bool):
             raise _err(origin, f"{label}.signed 必须是 true/false")
 
-        mapping.append((ioa, reg, float(scale), signed))
+        mapping.append((ioa, unit, kind, addr, float(scale), signed))
 
-    return {"type": stype, "host": host, "port": port, "unit": unit,
-            "timeout": float(timeout), "mapping": mapping}
+    out.update(port=port, baud=baud, default_unit=default_unit, mapping=mapping)
+    return out
 
 
 def load_source_spec(path: str, station: Optional[Station] = None) -> Optional[Dict[str, Any]]:
@@ -503,8 +563,58 @@ def load_source_spec(path: str, station: Optional[Station] = None) -> Optional[D
     return source_spec_from_dict(raw["source"], station=station, origin=path)
 
 
+#: `actuator` 段允许的字段（只有 RTU 模式用）
+_ACTUATOR_KEYS = frozenset({"type", "unit", "coil_base", "channels"})
+_ACTUATOR_TYPES = frozenset({"modbus_rtu"})
+
+
+def actuator_spec_from_dict(raw: Any, origin: str = "<内存>") -> Dict[str, Any]:
+    """校验点表里可选的 `actuator` 段（遥控落到哪一路继电器）。"""
+    if not isinstance(raw, dict):
+        raise _err(origin, f'"actuator" 必须是 JSON 对象，实际是 {type(raw).__name__}')
+    unknown = sorted(set(raw) - _ACTUATOR_KEYS)
+    if unknown:
+        raise _err(origin, f'"actuator" 含未知字段 {unknown}'
+                          f'（允许：{_allowed(_ACTUATOR_KEYS)}）')
+
+    atype = raw.get("type")
+    if atype not in _ACTUATOR_TYPES:
+        raise _err(origin, f'"actuator.type" 不支持 {atype!r}'
+                          f'（当前支持：{_allowed(_ACTUATOR_TYPES)}）')
+
+    def _int(name: str, lo: int, hi: int, default=None) -> int:
+        v = raw.get(name, default)
+        if v is None:
+            raise _err(origin, f'"actuator" 缺少字段 "{name}"')
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise _err(origin, f'"actuator.{name}" 必须是整数')
+        if not (lo <= v <= hi):
+            raise _err(origin, f'"actuator.{name}" 超出范围 [{lo}, {hi}]：{v}')
+        return v
+
+    return {
+        "type": atype,
+        "unit": _int("unit", 1, 247, 2),
+        "coil_base": _int("coil_base", 0, 65535, 0),
+        "channels": _int("channels", 1, 64, ACTUATOR_CHANNELS),
+    }
+
+
+def load_actuator_spec(path: str) -> Optional[Dict[str, Any]]:
+    """从点表 JSON 里读可选的 `actuator` 段；没有就返回 None。"""
+    path = os.fspath(path)
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            raw = json.load(f)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise _err(path, f"无法读取配置文件：{e}") from e
+    if not isinstance(raw, dict) or "actuator" not in raw:
+        return None
+    return actuator_spec_from_dict(raw["actuator"], origin=path)
+
+
 __all__ = [
     "ACTUATOR_CHANNELS", "ConfigError", "SUPPORTED_TYPES",
-    "load_station", "load_source_spec", "readback_map",
-    "source_spec_from_dict", "station_from_dict",
+    "actuator_spec_from_dict", "load_actuator_spec", "load_source_spec",
+    "load_station", "readback_map", "source_spec_from_dict", "station_from_dict",
 ]

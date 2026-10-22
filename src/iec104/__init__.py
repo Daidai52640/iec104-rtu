@@ -16,7 +16,8 @@
        ⚠️ SOE 时标精度受本地钟限制，不是毫秒级
     ✅ 短浮点(小端) / 单点 / 带时标单点 / 单点命令 编解码
     ✅ 南向数据源：桩 / Modbus TCP（从现场采集进程暴露的从站读，不抢串口）
-    ⬜ 南向 Modbus RTU 直连（继电器板到货后接另一条 485 总线）
+    ✅ 南向数据源：Modbus RTU（自己开串口扫 485 总线，可挂多个从站）
+    ✅ 南向执行器：Modbus RTU 写线圈（FC05）+ 回读（FC01）
 """
 
 from .actuator import Actuator, MemoryActuator
@@ -25,6 +26,9 @@ from .clock import ClockOffset
 from .link import Apdu, decode_apdu, encode_i_frame, encode_s_frame, encode_u_frame, iter_apdus
 from .quality import clear_faults, describe, is_good, mark_invalid, mark_stale
 from .server import Iec104Slave, Session
+from .rtu import (
+    ModbusRtuActuator, ModbusRtuSource, RtuError, RtuLink, crc16_modbus,
+)
 from .source import ModbusTcpSource, Source, StubSource
 from .station import CommandBinding, Point, Station
 from .consts import BROADCAST_CA, COT, QDS, SCO, SIQ, FrameFormat, SessionParam, TypeID, UFrame
@@ -36,6 +40,7 @@ __all__ = [
     "clear_faults", "describe", "is_good", "mark_invalid", "mark_stale",
     "ClockOffset",
     "Iec104Slave", "Session", "Source", "StubSource", "ModbusTcpSource",
+    "ModbusRtuSource", "ModbusRtuActuator", "RtuLink", "RtuError", "crc16_modbus",
     "CommandBinding", "Point", "Station",
     "BROADCAST_CA", "COT", "QDS", "SCO", "SIQ", "FrameFormat", "SessionParam", "TypeID", "UFrame",
 ]

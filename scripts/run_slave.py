@@ -25,10 +25,14 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from iec104 import Iec104Slave, MemoryActuator, ModbusTcpSource, StubSource  # noqa: E402
-from iec104.config import (  # noqa: E402
-    ACTUATOR_CHANNELS, ConfigError, load_source_spec, load_station, readback_map,
+from iec104 import (  # noqa: E402
+    Iec104Slave, MemoryActuator, ModbusTcpSource, StubSource,
 )
+from iec104.config import (  # noqa: E402
+    ACTUATOR_CHANNELS, ConfigError, load_actuator_spec, load_source_spec,
+    load_station, readback_map,
+)
+from iec104.rtu import ModbusRtuActuator, ModbusRtuSource, RtuLink  # noqa: E402
 
 # 默认点表按"项目根"解析，这样从任何目录启动都能找到同一份配置。
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -58,6 +62,7 @@ def main() -> int:
         rb_map = readback_map(station)
         # 点表里声明了 `source` 段 ⇒ 走真实数据源；没有 ⇒ 走桩数据源。
         source_spec = load_source_spec(args.points, station=station)
+        actuator_spec = load_actuator_spec(args.points)
     except ConfigError as e:
         print(f"启动失败：{e}", file=sys.stderr)
         return 2
@@ -71,8 +76,29 @@ def main() -> int:
     print(f"点表：{args.points}（CA={station.ca}，{len(station)} 个点）")
 
     actuator = MemoryActuator(channels=ACTUATOR_CHANNELS)
-    if source_spec is not None:
-        # ⭐ 真实数据源：从 Modbus TCP 从站读（不抢串口，可与现场采集进程共存）
+
+    if source_spec is not None and source_spec["type"] == "modbus_rtu":
+        # ⭐ 独占形态：自己开串口扫 485 总线（总线上可以挂多个从站）。
+        #    ⚠️ 半双工总线只能有一个主站，所以 source 和 actuator **共用同一个 RtuLink**。
+        try:
+            link = RtuLink(port=source_spec["port"], baud=source_spec["baud"],
+                           timeout=source_spec["timeout"])
+        except Exception as e:
+            print(f"启动失败：打开串口 {source_spec['port']} 失败 —— "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
+            print("  （RTU 模式需要 pyserial 和真实的串口；"
+                  "Linux 形如 /dev/ttyUSB0，Windows 形如 COM3）", file=sys.stderr)
+            return 2
+        source = ModbusRtuSource(link, source_spec["mapping"],
+                                 default_unit=source_spec["default_unit"])
+        if actuator_spec is not None:
+            actuator = ModbusRtuActuator(link, unit=actuator_spec["unit"],
+                                         coil_base=actuator_spec["coil_base"],
+                                         channels=actuator_spec["channels"])
+        print(f"数据源：Modbus RTU {source_spec['port']} @{source_spec['baud']}"
+              f"（{len(source_spec['mapping'])} 个映射点）")
+    elif source_spec is not None:
+        # ⭐ 共存形态：从别的采集进程暴露的 Modbus TCP 从站读，不抢串口。
         source = ModbusTcpSource(
             host=source_spec["host"], port=source_spec["port"],
             unit=source_spec["unit"], mapping=source_spec["mapping"],
