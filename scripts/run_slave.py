@@ -32,6 +32,7 @@ from iec104.config import (  # noqa: E402
     ACTUATOR_CHANNELS, ConfigError, load_actuator_spec, load_source_spec,
     load_station, readback_map,
 )
+from iec104 import sdnotify  # noqa: E402
 from iec104.rtu import ModbusRtuActuator, ModbusRtuSource, RtuLink  # noqa: E402
 
 # 默认点表按"项目根"解析，这样从任何目录启动都能找到同一份配置。
@@ -120,14 +121,20 @@ def main() -> int:
                         cyclic_s=args.cyclic, verbose=True,
                         actuator=actuator,
                         source=source if args.poll > 0 else None,
-                        poll_s=args.poll)
+                        poll_s=args.poll,
+                        heartbeat=sdnotify.watchdog)
     slave.start()
+    # ⭐ 告诉 systemd 已就绪（Type=notify 必须发，否则超时被杀）
+    if sdnotify.ready():
+        print("已通知 systemd：READY=1（看门狗取自采集循环）")
+        sdnotify.status(f"104 子站运行中 CA={station.ca} 端口={args.port}")
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         print("\n停止中…")
     finally:
+        sdnotify.stopping()
         slave.stop()
     return 0
 

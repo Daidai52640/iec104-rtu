@@ -17,7 +17,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import quality as q_
 from .actuator import Actuator, MemoryActuator
@@ -632,6 +632,7 @@ class Iec104Slave:
                  select_timeout: float = 30.0,
                  source: Optional[Source] = None,
                  poll_s: float = 0.0,
+                 heartbeat: Optional[Callable[[], None]] = None,
                  k: int = 12, w: int = 8,
                  t1: float = 15.0, t2: float = 10.0, t3: float = 20.0,
                  min_interval: float = 1.0) -> None:
@@ -645,6 +646,7 @@ class Iec104Slave:
         self.min_interval = min_interval      # 同一 IOA 两次成功执行的最小间隔（秒）
         self.source = source
         self.poll_s = poll_s
+        self._heartbeat: Optional[Callable[[], None]] = heartbeat
         self.k = k
         self.w = w
         self.t1 = t1
@@ -756,6 +758,14 @@ class Iec104Slave:
             except Exception as e:
                 if self.verbose:
                     print(f"    [POLL] 数据源异常: {type(e).__name__}: {e}", flush=True)
+
+            # ⭐ 喂狗放在"这一圈跑完了"的位置，而不是"读到了好数据"。
+            #    设备坏了不该触发重启（我们照样上送 IV）；只有**循环卡住**才是故障。
+            if self._heartbeat is not None:
+                try:
+                    self._heartbeat()
+                except Exception:
+                    pass
 
             changed = self.station.apply(values)
             if not changed:

@@ -1,0 +1,83 @@
+# 树莓派 systemd 托管实测（2026-10-22）
+
+> 目标：验收第 ⑤ 条「拔电重启后服务自愈、主站自动重连」。
+> 环境：树莓派 2B（`cems-edge` / armv7l / Raspbian 12 / Python 3.11.2），
+> 部署目录 `/home/ddf/iec104-rtu`，与 P1（`/home/ddf/cems`）完全隔离。
+
+---
+
+## 1. 单元状态
+
+```
+● iec104-slave.service - IEC 60870-5-104 slave (edge RTU)
+     Loaded: loaded (/etc/systemd/system/iec104-slave.service; enabled; preset: enabled)
+     Active: active (running) since Thu 2026-10-22 21:52:32 CST
+       Docs: https://github.com/Daidai52640/iec104-rtu
+   Main PID: 3013 (python3)
+     Status: "104 子站运行中 CA=1 端口=2404"
+     CGroup: /system.slice/iec104-slave.service
+             └─3013 /usr/bin/python3 scripts/run_slave.py --points config/points-pi.json --port 2404 --poll 2
+
+Oct 22 21:52:46 cems-edge iec104-slave[3013]:     [POLL] 正常｜变化 1 点: IOA2=60.2(good)
+```
+
+⭐ `Status:` 这一行来自 `sd_notify` 的 `STATUS=`——`systemctl status` 能直接看到"跑到哪一步了"。
+
+## 2. `kill -9` 自愈
+
+```
+PID: 3013 -> 3103
+NRestarts: 1
+is-active: active
+```
+
+`Restart=always` + `RestartSec=3` 生效：进程被杀后 ~3 秒内被拉起，PID 变了、服务仍 active。
+
+## 3. 看门狗
+
+```
+Type: notify
+WatchdogUSec: 1min
+```
+
+⭐ 判据不是"配置里有这一行"，而是**"超过一个看门狗周期仍未被杀"**：
+
+连续观察 70 秒（> `WatchdogSec=60`），PID 与 `NRestarts` 均未变化 ⇒
+采集循环每圈都在喂 `WATCHDOG=1`。
+
+⚠️ **喂狗的位置在"这一圈跑完了"，不是"读到了好数据"**：
+设备坏了不该触发重启（我们照样上送 IV）；只有**循环卡住**才是故障。
+
+## 4. 主站重连
+
+```
+第一次连接: 温度=26.1 湿度=60.3
+kill -9 子站 → systemd 重启
+重连后:     温度=26.1 湿度=60.3     RESULT: PASS
+```
+
+## 5. 两个项目同时在线
+
+```
+cems-device            active
+cems-gateway-plant1    active
+cems-gateway-plant2    active
+iec104-slave           active
+
+LISTEN 0.0.0.0:2404        ← 本子站
+LISTEN 127.0.0.1:5020      ← P1 的设备层
+```
+
+⭐ **共存模式不占串口**，所以能和 P1 并行运行；两边互不影响。
+
+---
+
+## 6. 边界（必须说清）
+
+| 项 | 说明 |
+|---|---|
+| 默认模式 | **共存**（`config/points-pi.json`）：从 P1 的 Modbus TCP 从站读，不碰 `/dev/ttyUSB0` |
+| 独占模式 | 改 `--points config/points-rtu.json`，**必须先停 P1**（串口只有一个） |
+| IOA 5/6 为 IV | **正确行为**：继电器板不归 P1 管，无数据源就必须标无效，不能给假值 |
+| 整机拔电 | 已 `enable`，逻辑上会自启；但**未实机断电验证**——那会连带重启 P1，属于另一件事 |
+| pyserial | 共存模式不需要；独占模式需要（装独立 venv，别污染 P1 的 `.venv`） |

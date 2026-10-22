@@ -1,0 +1,40 @@
+[Unit]
+# IEC 60870-5-104 子站（边缘远动终端）。
+# ⚠️ 默认用 config/points-pi.json —— **共存模式**：从 P1 暴露的 Modbus TCP 从站读，
+#    不碰 /dev/ttyUSB0，所以可以和 cems-* 服务同时运行。
+#    切到独占模式要改 --points config/points-rtu.json，并且**必须先停 P1**（串口只有一个）。
+Description=IEC 60870-5-104 slave (edge RTU)
+Documentation=https://github.com/Daidai52640/iec104-rtu
+After=network-online.target
+Wants=network-online.target
+
+# 反复崩溃时别无限重启，留个上限便于现场发现。
+# ⚠️ 这两项属于 [Unit]，写在 [Service] 里会被 systemd 忽略。
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+# ⭐ Type=notify + WatchdogSec：不只能救"进程死了"，还能救
+#    "进程活着但采集循环卡住不出数" —— 后者才是现场最难查的。
+Type=notify
+WatchdogSec=60
+NotifyAccess=main
+
+User=ddf
+Group=ddf
+WorkingDirectory=/home/ddf/iec104-rtu
+Environment=PYTHONPATH=/home/ddf/iec104-rtu/src
+Environment=PYTHONUNBUFFERED=1
+
+# 共存模式：读本机 P1 的 Modbus TCP 从站，不占串口
+ExecStart=/usr/bin/python3 scripts/run_slave.py --points config/points-pi.json --port 2404 --poll 2
+
+Restart=always
+RestartSec=3
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=iec104-slave
+
+[Install]
+WantedBy=multi-user.target
