@@ -1,0 +1,22 @@
+{
+  "common_address": 1,
+  "name": "pi-edge",
+  "source": {
+    "type": "modbus_tcp",
+    "host": "127.0.0.1",
+    "port": 5020,
+    "unit": 1,
+    "timeout": 2.0,
+    "map": [
+      {"ioa": 1, "register": 6, "scale": 10, "signed": true},
+      {"ioa": 2, "register": 7, "scale": 10, "signed": false}
+    ]
+  },
+  "points": [
+    {"ioa": 1,  "type": "M_ME_NC_1", "name": "Temp",     "value": 0.0,   "cyclic": true},
+    {"ioa": 2,  "type": "M_ME_NC_1", "name": "Humidity", "value": 0.0,   "cyclic": true},
+    {"ioa": 5,  "type": "M_SP_NA_1", "name": "DI1",      "value": false},
+    {"ioa": 6,  "type": "M_SP_NA_1", "name": "DI2",      "value": false},
+    {"ioa": 10, "type": "C_SC_NA_1", "name": "DO1",      "value": false, "actuator": 0, "readback_ioa": 5}
+  ]
+}

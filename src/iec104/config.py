@@ -66,7 +66,7 @@
 import json
 import math
 import os
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .consts import TypeID
 from .station import Station
@@ -92,7 +92,7 @@ _BOOL_VALUE_TYPES = frozenset({
 # 回读点只允许单点遥信（带不带时标都行）：上送 TypeID 由该点声明的类型决定。
 _READBACK_TYPES = frozenset({int(TypeID.M_SP_NA_1), int(TypeID.M_SP_TB_1)})
 
-_TOP_KEYS = frozenset({"common_address", "name", "points"})
+_TOP_KEYS = frozenset({"common_address", "name", "points", "source"})
 _POINT_KEYS = frozenset({
     "ioa", "type", "name", "value", "cyclic", "source_channel",
     "actuator", "readback_ioa", "mutex_group", "min_interval",
@@ -389,7 +389,122 @@ def readback_map(station: Station) -> Dict[int, int]:
     return mapping
 
 
+# ---------------------------------------------------------------- 数据源配置
+#: `source` 段允许的字段
+_SOURCE_KEYS = frozenset({"type", "host", "port", "unit", "timeout", "map"})
+_SOURCE_MAP_KEYS = frozenset({"ioa", "register", "scale", "signed"})
+_SOURCE_TYPES = frozenset({"modbus_tcp"})
+
+
+def source_spec_from_dict(raw: Any, station: Optional[Station] = None,
+                          origin: str = "<内存>") -> Dict[str, Any]:
+    """校验点表里的 `source` 段。
+
+    ⭐ 为什么数据源也进点表：现场设备地址、寄存器、系数都是"点表级"的事实，
+       和 IOA 一样属于运维改的东西，不该写死在启动脚本里。
+
+    返回可直接喂给 `ModbusTcpSource` 的参数（`mapping` 是元组列表）。
+    """
+    if not isinstance(raw, dict):
+        raise _err(origin, f'"source" 必须是 JSON 对象，实际是 {type(raw).__name__}')
+    unknown = sorted(set(raw) - _SOURCE_KEYS)
+    if unknown:
+        raise _err(origin, f'"source" 含未知字段 {unknown}'
+                          f'（允许：{_allowed(_SOURCE_KEYS)}）')
+
+    stype = raw.get("type")
+    if stype not in _SOURCE_TYPES:
+        raise _err(origin, f'"source.type" 不支持 {stype!r}'
+                          f'（当前支持：{_allowed(_SOURCE_TYPES)}）')
+
+    host = raw.get("host", "127.0.0.1")
+    if not isinstance(host, str) or not host:
+        raise _err(origin, '"source.host" 必须是非空字符串')
+
+    def _int_field(name: str, lo: int, hi: int, default: Optional[int] = None) -> int:
+        v = raw.get(name, default)
+        if v is None:
+            raise _err(origin, f'"source" 缺少字段 "{name}"')
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise _err(origin, f'"source.{name}" 必须是整数，实际是 {type(v).__name__}')
+        if not (lo <= v <= hi):
+            raise _err(origin, f'"source.{name}" 超出范围 [{lo}, {hi}]：{v}')
+        return v
+
+    port = _int_field("port", 1, 65535, 502)
+    unit = _int_field("unit", 1, 247, 1)
+
+    timeout = raw.get("timeout", 2.0)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise _err(origin, f'"source.timeout" 必须是数字，实际是 {type(timeout).__name__}')
+    if timeout <= 0:
+        raise _err(origin, f'"source.timeout" 必须 > 0：{timeout}')
+
+    maps = raw.get("map")
+    if not isinstance(maps, list) or not maps:
+        raise _err(origin, '"source.map" 必须是非空数组')
+
+    mapping: list = []
+    seen_ioa = set()
+    for i, m in enumerate(maps):
+        label = f"source.map[{i}]"
+        if not isinstance(m, dict):
+            raise _err(origin, f"{label} 必须是 JSON 对象")
+        unk = sorted(set(m) - _SOURCE_MAP_KEYS)
+        if unk:
+            raise _err(origin, f"{label} 含未知字段 {unk}"
+                              f"（允许：{_allowed(_SOURCE_MAP_KEYS)}）")
+
+        ioa = m.get("ioa")
+        if isinstance(ioa, bool) or not isinstance(ioa, int):
+            raise _err(origin, f"{label}.ioa 必须是整数")
+        if station is not None and station.get(ioa) is None:
+            raise _err(origin, f"{label}.ioa={ioa} 在点表里不存在")
+        if ioa in seen_ioa:
+            raise _err(origin, f"{label}.ioa={ioa} 重复")
+        seen_ioa.add(ioa)
+
+        reg = m.get("register")
+        if isinstance(reg, bool) or not isinstance(reg, int) or reg < 0:
+            raise _err(origin, f"{label}.register 必须是 >= 0 的整数")
+
+        scale = m.get("scale", 1)
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)) or scale <= 0:
+            raise _err(origin, f"{label}.scale 必须是 > 0 的数字")
+
+        signed = m.get("signed", False)
+        if not isinstance(signed, bool):
+            raise _err(origin, f"{label}.signed 必须是 true/false")
+
+        mapping.append((ioa, reg, float(scale), signed))
+
+    return {"type": stype, "host": host, "port": port, "unit": unit,
+            "timeout": float(timeout), "mapping": mapping}
+
+
+def load_source_spec(path: str, station: Optional[Station] = None) -> Optional[Dict[str, Any]]:
+    """从点表 JSON 里读 `source` 段。
+
+    没有该段 ⇒ 返回 `None`（表示用桩数据源，无硬件也能跑）。
+    """
+    path = os.fspath(path)
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        raise _err(path, "配置文件不存在") from None
+    except json.JSONDecodeError as e:
+        raise _err(path, f"JSON 语法错误（第 {e.lineno} 行第 {e.colno} 列）：{e.msg}") from e
+    except (OSError, UnicodeDecodeError) as e:
+        raise _err(path, f"无法读取配置文件：{e}") from e
+
+    if not isinstance(raw, dict) or "source" not in raw:
+        return None
+    return source_spec_from_dict(raw["source"], station=station, origin=path)
+
+
 __all__ = [
     "ACTUATOR_CHANNELS", "ConfigError", "SUPPORTED_TYPES",
-    "load_station", "readback_map", "station_from_dict",
+    "load_station", "load_source_spec", "readback_map",
+    "source_spec_from_dict", "station_from_dict",
 ]

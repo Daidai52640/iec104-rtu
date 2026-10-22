@@ -25,9 +25,9 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
-from iec104 import Iec104Slave, MemoryActuator, StubSource  # noqa: E402
+from iec104 import Iec104Slave, MemoryActuator, ModbusTcpSource, StubSource  # noqa: E402
 from iec104.config import (  # noqa: E402
-    ACTUATOR_CHANNELS, ConfigError, load_station, readback_map,
+    ACTUATOR_CHANNELS, ConfigError, load_source_spec, load_station, readback_map,
 )
 
 # 默认点表按"项目根"解析，这样从任何目录启动都能找到同一份配置。
@@ -56,6 +56,8 @@ def main() -> int:
         station = load_station(args.points)
         # 通道映射也在这里算：source_channel / 命令回读冲突会在这一步报错。
         rb_map = readback_map(station)
+        # 点表里声明了 `source` 段 ⇒ 走真实数据源；没有 ⇒ 走桩数据源。
+        source_spec = load_source_spec(args.points, station=station)
     except ConfigError as e:
         print(f"启动失败：{e}", file=sys.stderr)
         return 2
@@ -69,8 +71,19 @@ def main() -> int:
     print(f"点表：{args.points}（CA={station.ca}，{len(station)} 个点）")
 
     actuator = MemoryActuator(channels=ACTUATOR_CHANNELS)
-    # 回读接线也从点表推导，脚本里不再出现具体 IOA
-    source = StubSource(actuator=actuator, readback_map=rb_map)
+    if source_spec is not None:
+        # ⭐ 真实数据源：从 Modbus TCP 从站读（不抢串口，可与现场采集进程共存）
+        source = ModbusTcpSource(
+            host=source_spec["host"], port=source_spec["port"],
+            unit=source_spec["unit"], mapping=source_spec["mapping"],
+            timeout=source_spec["timeout"],
+        )
+        print(f"数据源：Modbus TCP {source_spec['host']}:{source_spec['port']} "
+              f"unit={source_spec['unit']}（{len(source_spec['mapping'])} 个映射点）")
+    else:
+        # 回读接线也从点表推导，脚本里不再出现具体 IOA
+        source = StubSource(actuator=actuator, readback_map=rb_map)
+        print("数据源：桩（无硬件，模拟数值）")
     if args.no_sim:
         source.fail = False
         # 静态值：仍然采集，但值不变（StubSource 内部相位靠轮次推进，
